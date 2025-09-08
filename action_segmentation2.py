@@ -289,15 +289,20 @@ class LightweightClassifier:
         self.best_models = {}
         self.feature_importance = {}
         
-    def train_multiple_models(self, X, y, groups, cv_splits):
+    def train_multiple_models(self, X, y, groups, cv_splits, class_weights=None):
         """Train multiple models efficiently"""
-        # Calculate class weights
         classes = np.unique(y)
-        class_weights_array = compute_class_weight('balanced', classes=classes, y=y)
-        class_weights = dict(zip(classes, class_weights_array))
+
+        # Calculate class weights
+        if class_weights is None:
+            print("No class weights provided, calculating balanced weights as default.")
+            class_weights_array = compute_class_weight('balanced', classes=classes, y=y)
+            class_weights = dict(zip(classes, class_weights_array))
         
         print(f"Training with {len(classes)} classes: {dict(zip(range(len(classes)), classes))}")
         print(f"Class distribution: {np.bincount(y)}")
+        print(f"Applying class weights: {class_weights}")
+        sample_weights = np.array([class_weights[label] for label in y])
         
         # Define models with reduced hyperparameter grids
         model_configs = {
@@ -315,7 +320,8 @@ class LightweightClassifier:
                     'n_estimators': [100, 200],
                     'max_depth': [3, 6],
                     'learning_rate': [0.1, 0.2]
-                }
+                },
+                'use_sample_weight': True
             },
         #     'lr': {
         #         'model': LogisticRegression(random_state=self.random_state, class_weight=class_weights, max_iter=1000),
@@ -343,12 +349,28 @@ class LightweightClassifier:
                     n_jobs=-1,
                     error_score='raise'
                 )
-                
-                search.fit(X, y, groups=groups)
+                # --- MODIFIED: Pass sample_weight to fit if required by the model ---
+                fit_params = {}
+                if config.get('use_sample_weight', False):
+                    print(f"Passing sample_weight to {model_name}.fit()")
+                    fit_params['sample_weight'] = sample_weights
+
+                search.fit(X, y, groups=groups, **fit_params)
                 self.best_models[model_name] = search.best_estimator_
-                scores[model_name] = search.best_score_
                 
-                print(f"Best {model_name} score: {search.best_score_:.4f}")
+                best_index = search.best_index_
+                fold_scores = [search.cv_results_[f'split{i}_test_score'][best_index] for i in range(search.n_splits_)]
+                
+                mean_score = np.mean(fold_scores)
+                sem_score = np.std(fold_scores) / np.sqrt(len(fold_scores))
+
+                scores[model_name] = {
+                    'mean': mean_score,
+                    'sem': sem_score,
+                    'all_folds': fold_scores
+                }
+                
+                print(f"Best {model_name} score: {mean_score:.4f} ± {sem_score:.4f} (SEM)")
                 print(f"Best {model_name} params: {search.best_params_}")
                 
                 # Feature importance for tree-based models
@@ -499,7 +521,8 @@ class SimpleEvaluator:
 # Main Lightweight Pipeline
 class LightweightBehavioralPipeline:
     def __init__(self, window_sizes=[15, 30], batch_size=5, 
-                 sequential_lags=[1, 2, 3], sequential_features=None):
+                 sequential_lags=[1, 2, 3], sequential_features=None,
+                 class_weight=None):
         self.feature_engineer = MemoryOptimizedFeatureEngineer(
             window_sizes=window_sizes,
             sequential_lags=sequential_lags,
@@ -509,6 +532,7 @@ class LightweightBehavioralPipeline:
         self.classifier = LightweightClassifier()
         self.evaluator = SimpleEvaluator()
         self.batch_size = batch_size
+        self.class_weight = class_weight
         
     def run_pipeline(self, feature_files, label_files, cv_folds=3):
         """Run the lightweight pipeline"""
@@ -536,6 +560,25 @@ class LightweightBehavioralPipeline:
         
         print(f"Final feature matrix shape: {X.shape}")
         print(f"Memory usage: {X.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
+
+        # --- NEW: Process class weights ---
+        model_class_weights = None
+        if self.class_weight:
+            if self.class_weight == 'balanced':
+                print("Using 'balanced' class weights.")
+                classes = np.unique(y)
+                weights = compute_class_weight('balanced', classes=classes, y=y)
+                model_class_weights = dict(zip(classes, weights))
+            elif isinstance(self.class_weight, dict):
+                print(f"Using custom class weights: {self.class_weight}")
+                # Map string class names to integer labels used by the model
+                encoder_classes = list(self.data_preparator.target_encoder.classes_)
+                model_class_weights = {
+                    encoder_classes.index(cls): weight
+                    for cls, weight in self.class_weight.items()
+                    if cls in encoder_classes
+                }
+                print(f"Mapped to encoded labels: {model_class_weights}")
         
         # Create CV splits
         cv = GroupKFold(n_splits=cv_folds)
@@ -543,7 +586,7 @@ class LightweightBehavioralPipeline:
         
         # Train model
         print("Training models...")
-        scores = self.classifier.train_multiple_models(X, y, groups, cv_splits)
+        scores = self.classifier.train_multiple_models(X, y, groups, cv_splits, class_weights=model_class_weights)
         
         # Evaluate all models
         print("Evaluating models...")
@@ -558,27 +601,33 @@ class LightweightBehavioralPipeline:
             y_pred = self.classifier.predict(X, model_name)
             report, cm = self.evaluator.evaluate_model(y, y_pred, self.data_preparator.target_encoder, show_plot=False)
             results[model_name] = {
-                'cv_score': scores.get(model_name, 0),
+                'cv_score_mean': scores.get(model_name, {}).get('mean', 0),
+                'cv_score_sem': scores.get(model_name, {}).get('sem', 0),
                 'classification_report': report,
                 'confusion_matrix': cm
             }
             print(f"\n{model_name.upper()} Results:")
-            print(f"CV Score: {scores.get(model_name, 0):.4f}")
-            print(f"Accuracy: {report['accuracy']:.4f}")
-            print(f"Macro F1: {report['macro avg']['f1-score']:.4f}")
+            print(f"CV Score: {results[model_name]['cv_score_mean']:.4f} ± {results[model_name]['cv_score_sem']:.4f} (SEM)")
+            print(f"In-sample Accuracy: {report['accuracy']:.4f}")
+            print(f"In-sample Macro F1: {report['macro avg']['f1-score']:.4f}")
         
         # Evaluate ensemble if available
         if hasattr(self.classifier, 'ensemble'):
             y_pred_ensemble = self.classifier.predict(X, 'ensemble')
             report_ensemble, cm_ensemble = self.evaluator.evaluate_model(y, y_pred_ensemble, self.data_preparator.target_encoder, show_plot=True)
+            avg_cv_mean = np.mean([s['mean'] for s in scores.values()])
+            avg_cv_sem = np.mean([s['sem'] for s in scores.values()]) # Note: This is a simplification
+
             results['ensemble'] = {
-                'cv_score': np.mean(list(scores.values())),  # Average of individual scores
+                'cv_score_mean': avg_cv_mean,
+                'cv_score_sem': avg_cv_sem,
                 'classification_report': report_ensemble,
                 'confusion_matrix': cm_ensemble
             }
             print(f"\nENSEMBLE Results:")
-            print(f"Accuracy: {report_ensemble['accuracy']:.4f}")
-            print(f"Macro F1: {report_ensemble['macro avg']['f1-score']:.4f}")
+            print(f"In-sample Accuracy: {report_ensemble['accuracy']:.4f}")
+            print(f"In-sample Macro F1: {report_ensemble['macro avg']['f1-score']:.4f}")
+
         elif self.classifier.best_models:
             # If no ensemble, show plot for best individual model
             best_individual = max(results.keys(), key=lambda x: results[x]['classification_report']['macro avg']['f1-score'])
@@ -635,7 +684,13 @@ if __name__ == "__main__":
             'head_angle', 'cricket_angle', 'relative_angle', 
             'distance', 'cricket_in_binocular', 'is_cricket_visible',
             'zone'  # Important for behavioral context
-        ]
+        ],
+        class_weight={
+            'attack': 1.2,
+            'non_visual_rotation': 1.0,
+            'chasing': 0.94,
+            'background': 1.0
+        }
     )
     
     # Run the pipeline
@@ -660,7 +715,9 @@ if __name__ == "__main__":
             
             for model_name, model_results in results['results'].items():
                 f1_score = model_results['classification_report']['macro avg']['f1-score']
-                print(f"{model_name}: CV={model_results['cv_score']:.4f}, Accuracy={model_results['classification_report']['accuracy']:.4f}, F1={f1_score:.4f}")
+                cv_mean = model_results['cv_score_mean']
+                cv_sem = model_results['cv_score_sem']
+                print(f"{model_name}: CV F1={cv_mean:.4f} ± {cv_sem:.4f}, In-sample F1={f1_score:.4f}")
                 
                 if f1_score > best_f1:
                     best_f1 = f1_score
