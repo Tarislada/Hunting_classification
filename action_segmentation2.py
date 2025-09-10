@@ -421,40 +421,84 @@ class LightweightClassifier:
             return self.best_models[first_model].predict_proba(X)
 
 class SimpleEvaluator:
-    def evaluate_model(self, y_true, y_pred, target_encoder, show_plot=False):
-        """Simple evaluation"""
+    def evaluate_model(self, y_true, y_pred, target_encoder, groups=None, show_plot=False, num_plot_trials=3):
+        """
+        Simple evaluation with option to plot individual trials.
+        Args:
+            y_true, y_pred: The true and predicted labels.
+            target_encoder: The fitted LabelEncoder.
+            groups: Series with group/trial IDs for each sample.
+            show_plot: Whether to generate and show plots.
+            num_plot_trials: The number of individual trials to plot.
+        """
         # Get class names
         class_names = target_encoder.classes_
         
         # Classification report
         report = classification_report(y_true, y_pred, 
                                      target_names=class_names, 
-                                     output_dict=True)
+                                     output_dict=True,
+                                     zero_division=0)
         
         # Confusion matrix
-        cm = confusion_matrix(y_true, y_pred)
+        cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)))
         
         # Only show detailed output and plot if requested
         if show_plot:
             print("\nClassification Report:")
-            print(classification_report(y_true, y_pred, target_names=class_names))
+            print(classification_report(y_true, y_pred, target_names=class_names, zero_division=0))
             
-            # Create subplots for confusion matrix and sequence plot
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
-            
-            # Plot confusion matrix
-            sns.heatmap(cm, annot=True, fmt='d', 
-                       xticklabels=class_names, 
-                       yticklabels=class_names, ax=ax1)
-            ax1.set_title('Confusion Matrix')
-            ax1.set_ylabel('True Label')
-            ax1.set_xlabel('Predicted Label')
-            
-            # Plot sequence comparison
-            self.plot_sequence_comparison(y_true, y_pred, class_names, ax2)
-            
-            plt.tight_layout()
-            plt.show()
+            # --- MODIFIED: Plot individual trials instead of one long sequence ---
+            if groups is not None:
+                unique_trials = groups.unique()
+                
+                # Determine which trials to plot
+                if len(unique_trials) > num_plot_trials:
+                    plot_trials = np.random.choice(unique_trials, num_plot_trials, replace=False)
+                    print(f"\nShowing sequence plots for {num_plot_trials} random trials (out of {len(unique_trials)} total).")
+                else:
+                    plot_trials = unique_trials
+                    print(f"\nShowing sequence plots for all {len(unique_trials)} trials.")
+
+                # Create a plot for each selected trial
+                for trial_id in plot_trials:
+                    trial_mask = (groups == trial_id)
+                    y_true_trial = y_true[trial_mask]
+                    y_pred_trial = y_pred[trial_mask]
+                    
+                    # Need to reset index if they are numpy arrays from boolean indexing
+                    if isinstance(y_true_trial, pd.Series):
+                        y_true_trial = y_true_trial.values
+                    if isinstance(y_pred_trial, pd.Series):
+                        y_pred_trial = y_pred_trial.values
+
+                    fig, ax = plt.subplots(1, 1, figsize=(15, 4))
+                    self.plot_sequence_comparison(y_true_trial, y_pred_trial, class_names, ax)
+                    ax.set_title(f'Behavioral Sequence Comparison - Trial: {trial_id}')
+                    plt.show()
+
+                # Also plot the overall confusion matrix
+                plt.figure(figsize=(10, 8))
+                sns.heatmap(cm, annot=True, fmt='d', 
+                           xticklabels=class_names, 
+                           yticklabels=class_names)
+                plt.title('Overall Confusion Matrix (All Trials)')
+                plt.ylabel('True Label')
+                plt.xlabel('Predicted Label')
+                plt.show()
+
+            else:
+                # Fallback to old behavior if no groups are provided
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
+                sns.heatmap(cm, annot=True, fmt='d', 
+                           xticklabels=class_names, 
+                           yticklabels=class_names, ax=ax1)
+                ax1.set_title('Confusion Matrix')
+                ax1.set_ylabel('True Label')
+                ax1.set_xlabel('Predicted Label')
+                self.plot_sequence_comparison(y_true, y_pred, class_names, ax2)
+                plt.tight_layout()
+                plt.show()
         
         return report, cm
     
@@ -614,7 +658,11 @@ class LightweightBehavioralPipeline:
         # Evaluate ensemble if available
         if hasattr(self.classifier, 'ensemble'):
             y_pred_ensemble = self.classifier.predict(X, 'ensemble')
-            report_ensemble, cm_ensemble = self.evaluator.evaluate_model(y, y_pred_ensemble, self.data_preparator.target_encoder, show_plot=True)
+            # --- MODIFIED: Pass groups to the evaluator ---
+            report_ensemble, cm_ensemble = self.evaluator.evaluate_model(
+                y, y_pred_ensemble, self.data_preparator.target_encoder, 
+                groups=groups, show_plot=True, num_plot_trials=3
+            )
             avg_cv_mean = np.mean([s['mean'] for s in scores.values()])
             avg_cv_sem = np.mean([s['sem'] for s in scores.values()]) # Note: This is a simplification
 
@@ -632,7 +680,12 @@ class LightweightBehavioralPipeline:
             # If no ensemble, show plot for best individual model
             best_individual = max(results.keys(), key=lambda x: results[x]['classification_report']['macro avg']['f1-score'])
             y_pred_best = self.classifier.predict(X, best_individual)
-            self.evaluator.evaluate_model(y, y_pred_best, self.data_preparator.target_encoder, show_plot=True)
+            # --- MODIFIED: Pass groups to the evaluator ---
+            print(f"\nShowing sequence plots for best individual model: {best_individual}")
+            self.evaluator.evaluate_model(
+                y, y_pred_best, self.data_preparator.target_encoder, 
+                groups=groups, show_plot=True, num_plot_trials=3
+            )
         
         return {
             'data_shape': data.shape,
