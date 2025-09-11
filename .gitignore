@@ -213,3 +213,18 @@ __marimo__/
 *.joblib
 *.h5
 *.hdf5
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wav
+*.flac
+*.jpg
+*.jpeg
+*.png
+*.tiff
+*.bmp
+*.gif
+*.zip
+*.tar.gz
+.SKH FP/
