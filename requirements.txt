@@ -1,0 +1,34 @@
+# Core data processing
+pandas>=1.5.0
+numpy>=1.21.0
+
+# Computer vision and video processing
+opencv-python>=4.6.0
+
+# Signal processing and scientific computing
+scipy>=1.9.0
+
+# Machine learning and statistics
+scikit-learn>=1.1.0
+xgboost>=1.6.0
+
+# Plotting and visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Kalman filtering
+filterpy>=1.4.5
+
+# System monitoring
+psutil>=5.9.0
+
+# Optional: For better performance (uncomment if needed)
+# numba>=0.56.0           # JIT compilation for faster numerical computing
+# openpyxl>=3.0.0         # Excel file support for annotations
+# xlrd>=2.0.0             # Excel file reading
+
+# Development tools (uncomment for development)
+# pytest>=7.0.0           # Testing framework
+# black>=22.0.0           # Code formatting
+# flake8>=4.0.0           # Linting
+# jupyter>=1.0.0          # Jupyter notebooks for analysis
