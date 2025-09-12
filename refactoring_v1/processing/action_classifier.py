@@ -294,7 +294,7 @@ class XGBoostClassifier:
             base_model = XGBClassifier(
                 random_state=self.config.random_state,
                 eval_metric='mlogloss',
-                # use_label_encoder=False
+                use_label_encoder=False
             )
             
             # Hyperparameter tuning
