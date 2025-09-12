@@ -205,6 +205,18 @@ class DataPreparator:
         # Scale only numeric features
         numeric_cols = X_selected.select_dtypes(include=[np.number]).columns
         X_scaled = X_selected.copy()
+        # # Remove any NaN, Inf, or extreme values
+        # X_scaled = X_scaled.replace([np.inf, -np.inf], np.nan)
+        # X_scaled = X_scaled.fillna(X_scaled.median())
+
+        # # Check for any remaining issues
+        # print(f"NaN values: {X_scaled.isna().sum().sum()}")
+        # print(f"Inf values: {np.isinf(X_scaled.values).sum()}")
+        # print(f"Data range: {X_scaled.min().min():.3f} to {X_scaled.max().max():.3f}")
+
+        # # Clip extreme values that might cause XGBoost issues
+        # X_scaled = X_scaled.clip(lower=-1e6, upper=1e6)
+
         X_scaled[numeric_cols] = self.scaler.fit_transform(X_selected[numeric_cols])
         
         return X_scaled, y_encoded, groups, list(X_scaled.columns)
@@ -279,12 +291,12 @@ class XGBoostClassifier:
         # Define XGBoost hyperparameter grid
         param_grid = {
             'n_estimators': [100, 200, 300],
-            'max_depth': [3, 6, 9],
-            'learning_rate': [0.01, 0.1, 0.2],
-            'subsample': [0.8, 0.9, 1.0],
-            'colsample_bytree': [0.8, 0.9, 1.0],
-            'reg_alpha': [0, 0.1, 1],
-            'reg_lambda': [1, 1.5, 2]
+            'max_depth': [3, 6],
+            'learning_rate': [0.1, 0.2],
+            # 'subsample': [0.8, 0.9, 1.0],
+            # 'colsample_bytree': [0.8, 0.9, 1.0],
+            # 'reg_alpha': [0, 0.1, 1],
+            # 'reg_lambda': [1, 1.5, 2]
         }
         
         print(f"\nTraining XGBoost with hyperparameter search...")
@@ -294,7 +306,7 @@ class XGBoostClassifier:
             base_model = XGBClassifier(
                 random_state=self.config.random_state,
                 eval_metric='mlogloss',
-                use_label_encoder=False
+                # use_label_encoder=False
             )
             
             # Hyperparameter tuning
@@ -303,16 +315,37 @@ class XGBoostClassifier:
                 param_grid,
                 cv=cv_splits,
                 scoring='f1_macro',
-                n_iter=20,  # Increased iterations for better hyperparameter search
+                n_iter=6,  # Increased iterations for better hyperparameter search
                 random_state=self.config.random_state,
                 n_jobs=-1,
                 error_score='raise'
             )
             
             # Fit with sample weights
-            print("Fitting model with sample weights...")
-            search.fit(X, y, groups=groups, sample_weight=sample_weights)
-            
+            try:
+                search.fit(X, y, groups=groups, sample_weight=sample_weights)
+                print("✓ XGBoost hyperparameter search completed successfully")
+                
+            except MemoryError as e:
+                print(f"❌ XGBoost training failed: OUT OF MEMORY")
+                print(f"   Try reducing batch_size or cv_folds in config")
+                raise e
+                
+            except Exception as e:
+                print(f"❌ XGBoost training failed with error: {e}")
+                print(f"   Data shape: {X.shape}")
+                print(f"   Memory usage: {X.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
+                print(f"   Feature types: {X.dtypes.value_counts()}")
+                return {
+                        'mean': 0.0,
+                        'sem': 0.0, 
+                        'all_folds': [],
+                        'best_params': {},
+                        'error': str(e),
+                        'failed': True
+                    }
+
+                # raise e            
             self.model = search.best_estimator_
             
             # Calculate CV scores
@@ -493,9 +526,14 @@ class ActionClassifier:
         self.classifier = XGBoostClassifier(self.config)
         self.evaluator = Evaluator()
         
+    def __del__(self):
+        """Cleanup resources on object destruction."""
+        import gc
+        gc.collect()
+    
     def process_files(self, feature_files: List[str], label_files: List[str]) -> Dict[str, Any]:
         """Process feature and label files for action classification."""
-        print("=== ACTION CLASSIFICATION (Step 6) ===")
+        print("=== ACTION CLASSIFICATION (Step 7) ===")
         
         # Check available memory
         memory_gb = psutil.virtual_memory().total / (1024**3)

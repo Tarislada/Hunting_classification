@@ -1,0 +1,26 @@
+start 4.5
+cricket in 부터(1093) 36.5s
+rearing/grooming 구간(분석 제외할 곳)
+
+pursuit 구간(메인 분석)
+1106	1154	nV
+1165	1257	L B
+1272	1303	R B
+1312	1342	nV
+1380	1462	nV
+1536	1609	nV
+1669	1771	nV
+1785	1845	nV
+2458	2517	nV
+2675	2847	R B R B
+2848	4155	consume
+4158	4174	B
+4175	4237	consume
+4246	4349	B L B
+4350	5820	consume
+
+attack
+2838	*
+4173	*
+4345	*
+
