@@ -92,13 +92,31 @@ class HuntingClassificationPipeline:
         """
         step_info = self.steps[step_name]
         
+        # Special handling for optional label processor
+        if step_name == 'label_processor':
+            # Check if processed labels already exist
+            behavior_labels_dir = getattr(self.config.paths, 'behavior_labels_dir')
+            if Path(behavior_labels_dir).exists():
+                processed_labels = list(Path(behavior_labels_dir).glob('*_processed_labels.csv'))
+                if processed_labels:
+                    print(f"  ✓ Found {len(processed_labels)} existing processed label files")
+                    return 'skip'
+            
+            # Check if annotation directory exists
+            annotation_dir = getattr(self.config.paths, 'annotation_dir')
+            if not Path(annotation_dir).exists():
+                print(f"  ⚠️  Annotation directory not found: {annotation_dir}")
+                print(f"     Label processing will be skipped - classification may fail without labels")
+                return 'skip'
+        
+        # Standard input validation for all other steps
         for input_dir in step_info['required_inputs']:
             dir_path = getattr(self.config.paths, input_dir)
             if not Path(dir_path).exists():
                 print(f"  ✗ Missing input directory: {dir_path}")
-                return False
+                return 'invalid'
         
-        return True
+        return 'valid'
     
     def create_output_directories(self):
         """Create all output directories if they don't exist."""
@@ -139,8 +157,19 @@ class HuntingClassificationPipeline:
         
         # Validate inputs
         print("Validating inputs...")
-        if not self.validate_inputs(step_name):
+        validation_result = self.validate_inputs(step_name)
+        
+        if validation_result == 'invalid':
             return {'success': False, 'error': 'Missing required inputs'}
+        elif validation_result == 'skip':
+            return {
+                'success': True, 
+                'skipped': True, 
+                'processing_time': 0,
+                'step_name': step_name,
+                'reason': 'Step skipped (inputs not needed or outputs exist)'
+            }
+        
         print("  ✓ All inputs available")
         
         # Initialize processor
