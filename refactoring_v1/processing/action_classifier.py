@@ -303,7 +303,7 @@ class XGBoostClassifier:
                 param_grid,
                 cv=cv_splits,
                 scoring='f1_macro',
-                n_iter=20,  # Increased iterations for better hyperparameter search
+                n_iter=3,  # Increased iterations for better hyperparameter search
                 random_state=self.config.random_state,
                 n_jobs=-1,
                 error_score='raise'
