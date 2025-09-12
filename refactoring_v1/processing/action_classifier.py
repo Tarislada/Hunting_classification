@@ -279,12 +279,12 @@ class XGBoostClassifier:
         # Define XGBoost hyperparameter grid
         param_grid = {
             'n_estimators': [100, 200, 300],
-            'max_depth': [3, 6, 9],
-            'learning_rate': [0.01, 0.1, 0.2],
-            'subsample': [0.8, 0.9, 1.0],
-            'colsample_bytree': [0.8, 0.9, 1.0],
-            'reg_alpha': [0, 0.1, 1],
-            'reg_lambda': [1, 1.5, 2]
+            'max_depth': [3, 6],
+            'learning_rate': [0.1, 0.2],
+            # 'subsample': [0.8, 0.9, 1.0],
+            # 'colsample_bytree': [0.8, 0.9, 1.0],
+            # 'reg_alpha': [0, 0.1, 1],
+            # 'reg_lambda': [1, 1.5, 2]
         }
         
         print(f"\nTraining XGBoost with hyperparameter search...")
