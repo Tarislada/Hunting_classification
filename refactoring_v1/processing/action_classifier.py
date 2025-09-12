@@ -278,7 +278,7 @@ class XGBoostClassifier:
         
         # Define XGBoost hyperparameter grid
         param_grid = {
-            'n_estimators': [100, 200, 300],
+            'n_estimators': [100, 200],
             'max_depth': [3, 6],
             'learning_rate': [0.1, 0.2],
             # 'subsample': [0.8, 0.9, 1.0],
