@@ -495,7 +495,7 @@ class ActionClassifier:
         
     def process_files(self, feature_files: List[str], label_files: List[str]) -> Dict[str, Any]:
         """Process feature and label files for action classification."""
-        print("=== ACTION CLASSIFICATION (Step 6) ===")
+        print("=== ACTION CLASSIFICATION (Step 7) ===")
         
         # Check available memory
         memory_gb = psutil.virtual_memory().total / (1024**3)

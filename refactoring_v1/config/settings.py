@@ -11,23 +11,23 @@ from typing import List, Dict, Optional, Tuple, Any
 class DirectoryPaths:
     """All directory paths used in the pipeline."""
     # Input directories
-    raw_video_dir: str = "SKH FP/video_file"
-    pose_data_dir: str = "SKH FP/pose_data"
-    cricket_detection_dir: str = "SKH FP/cricket_dection5"
-    interval_txt_dir: str = "SKH FP/interval_txt"
-    annotation_dir: str = "SKH FP/mouse_hunting_annotations"
-    
+    raw_video_dir: str = "SKH_FP/video_file"
+    pose_data_dir: str = "SKH_FP/pose_data"
+    cricket_detection_dir: str = "SKH_FP/cricket_dection5"
+    interval_txt_dir: str = "SKH_FP/interval_txt"
+    annotation_dir: str = "SKH_FP/mouse_hunting_annotations"
+
     # Intermediate processing directories
-    savgol_pose_dir: str = "SKH FP/savgol_pose_w59p7"
-    head_angle_dir: str = "SKH FP/head_angle_w59p7"
-    kalman_filtered_dir: str = "SKH FP/kalman_filtered_w59p7"
-    cricket_processed_dir: str = "SKH FP/FInalized_process/cricket_process_test5"
-    
+    savgol_pose_dir: str = "SKH_FP/savgol_pose_w59p7"
+    head_angle_dir: str = "SKH_FP/head_angle_w59p7"
+    kalman_filtered_dir: str = "SKH_FP/kalman_filtered_w59p7"
+    cricket_processed_dir: str = "SKH_FP/FInalized_process/cricket_process_test5"
+
     # Output directories
-    final_videos_dir: str = "SKH FP/FInalized_process/test_val_vid5"
-    behavior_labels_dir: str = "SKH FP/FInalized_process/Behavior_label"
-    visualization_dir: str = "SKH FP/FInalized_process/data_visualization1"
-    
+    final_videos_dir: str = "SKH_FP/FInalized_process/test_val_vid5"
+    behavior_labels_dir: str = "SKH_FP/FInalized_process/Behavior_label"
+    visualization_dir: str = "SKH_FP/FInalized_process/data_visualization1"
+
     def __post_init__(self):
         """Convert string paths to Path objects and create directories if needed."""
         for field_name, value in self.__dict__.items():
