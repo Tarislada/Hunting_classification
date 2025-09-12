@@ -15,6 +15,7 @@ from processing.kalman_filter import KalmanAngleProcessor
 from processing.cricket_processor import CricketProcessor
 from processing.feature_engineer import FeatureEngineer
 from processing.action_classifier import ActionClassifier
+from utils.label_processor import LabelProcessor
 
 class HuntingClassificationPipeline:
     """
@@ -60,6 +61,13 @@ class HuntingClassificationPipeline:
                 'description': 'Visual field analysis and feature engineering',
                 'required_inputs': ['raw_video_dir', 'kalman_filtered_dir', 'cricket_processed_dir'],
                 'outputs': ['final_videos_dir']
+            },
+            'label_processor': {
+                'processor': LabelProcessor,
+                'description': 'Convert behavior annotations to processed labels',
+                'required_inputs': ['annotation_dir'],
+                'outputs': ['behavior_labels_dir'],
+                'optional': True
             },
             'action_classifier': {
                 'processor': ActionClassifier,
@@ -161,7 +169,11 @@ class HuntingClassificationPipeline:
             elif step_name == 'feature_engineer':
                 processor = processor_class()
                 result = processor.process()
-                
+
+            elif step_name == 'label_processor':
+                processor = processor_class()
+                result = processor.process()
+
             elif step_name == 'action_classifier':
                 processor = processor_class()
                 result = processor.process()
@@ -177,10 +189,13 @@ class HuntingClassificationPipeline:
             
             print(f"\n✓ {step_name.replace('_', ' ').title()} completed successfully")
             print(f"  Processing time: {step_time:.1f} seconds")
-            if 'processed' in result:
-                print(f"  Files processed: {result['processed']}")
-            if 'failed' in result:
-                print(f"  Files failed: {result['failed']}")
+            if result.get('skipped'):
+                print(f"  Status: Skipped - {result.get('reason', 'No reason provided')}")
+            else:
+                if 'processed' in result:
+                    print(f"  Files processed: {result['processed']}")
+                if 'failed' in result:
+                    print(f"  Files failed: {result['failed']}")
             
             return result
             
@@ -270,11 +285,12 @@ class HuntingClassificationPipeline:
                 pipeline_success = False
                 break
             
-            # Accumulate statistics
-            if 'processed' in step_result:
-                total_files_processed += step_result['processed']
-            if 'failed' in step_result:
-                total_files_failed += step_result['failed']
+            # Accumulate statistics (skip skipped steps from counts)
+            if not step_result.get('skipped', False):
+                if 'processed' in step_result:
+                    total_files_processed += step_result['processed']
+                if 'failed' in step_result:
+                    total_files_failed += step_result['failed']
         
         # Pipeline summary
         total_time = time.time() - self.start_time

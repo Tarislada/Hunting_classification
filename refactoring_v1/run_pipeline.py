@@ -51,6 +51,7 @@ EXAMPLES:
     python run_pipeline.py steps              # List all steps
     python run_pipeline.py check              # Check inputs
     python run_pipeline.py filter             # Run only keypoint filtering
+    python run_pipeline.py labels             # Run only label processing
     python run_pipeline.py features           # Run only feature engineering
     python run_pipeline.py --output-dir ./results  # Custom output directory
 
