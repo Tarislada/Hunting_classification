@@ -205,17 +205,54 @@ class DataPreparator:
         # Scale only numeric features
         numeric_cols = X_selected.select_dtypes(include=[np.number]).columns
         X_scaled = X_selected.copy()
-        # # Remove any NaN, Inf, or extreme values
-        # X_scaled = X_scaled.replace([np.inf, -np.inf], np.nan)
-        # X_scaled = X_scaled.fillna(X_scaled.median())
+        
+        # Remove any NaN, Inf, or extreme values
+        print("Cleaning data before scaling...")
+        initial_nan_count = X_scaled.isna().sum().sum()
+        initial_inf_count = np.isinf(X_scaled.select_dtypes(include=[np.number]).values).sum()
+        
+        X_scaled = X_scaled.replace([np.inf, -np.inf], np.nan)
+        
+        # Fill NaN values with median, but handle columns with all NaN values
+        for col in X_scaled.select_dtypes(include=[np.number]).columns:
+            if X_scaled[col].isna().all():
+                print(f"Warning: Column '{col}' has all NaN values, filling with 0")
+                X_scaled[col] = 0.0
+            else:
+                median_val = X_scaled[col].median()
+                if pd.isna(median_val):
+                    print(f"Warning: Cannot compute median for column '{col}', using 0")
+                    X_scaled[col] = X_scaled[col].fillna(0.0)
+                else:
+                    X_scaled[col] = X_scaled[col].fillna(median_val)
 
-        # # Check for any remaining issues
-        # print(f"NaN values: {X_scaled.isna().sum().sum()}")
-        # print(f"Inf values: {np.isinf(X_scaled.values).sum()}")
-        # print(f"Data range: {X_scaled.min().min():.3f} to {X_scaled.max().max():.3f}")
+        # Check for any remaining issues
+        final_nan_count = X_scaled.isna().sum().sum()
+        final_inf_count = np.isinf(X_scaled.select_dtypes(include=[np.number]).values).sum()
+        
+        print(f"NaN values: {initial_nan_count} → {final_nan_count}")
+        print(f"Inf values: {initial_inf_count} → {final_inf_count}")
+        
+        if final_nan_count > 0 or final_inf_count > 0:
+            print(f"WARNING: Still have problematic values after cleaning!")
+            
+        numeric_data = X_scaled.select_dtypes(include=[np.number])
+        if len(numeric_data.columns) > 0:
+            data_min = numeric_data.min().min()
+            data_max = numeric_data.max().max()
+            print(f"Data range: {data_min:.3f} to {data_max:.3f}")
 
-        # # Clip extreme values that might cause XGBoost issues
-        # X_scaled = X_scaled.clip(lower=-1e6, upper=1e6)
+            # Clip extreme values that might cause XGBoost issues
+            extreme_count = 0
+            for col in numeric_cols:
+                col_min = X_scaled[col].min()
+                col_max = X_scaled[col].max()
+                if abs(col_min) > 1e6 or abs(col_max) > 1e6:
+                    extreme_count += 1
+                X_scaled[col] = X_scaled[col].clip(lower=-1e6, upper=1e6)
+            
+            if extreme_count > 0:
+                print(f"Clipped extreme values in {extreme_count} columns to [-1e6, 1e6] range")
 
         X_scaled[numeric_cols] = self.scaler.fit_transform(X_selected[numeric_cols])
         
@@ -323,12 +360,147 @@ class XGBoostClassifier:
             
             # Fit with sample weights
             try:
+                # Comprehensive data validation before fitting (as suggested in the issue)
+                print("\nPerforming comprehensive data validation before XGBoost training...")
+                
+                validation_errors = []
+                data_issues_fixed = 0
+                
+                # Check for NaN and Inf values in X
+                X_nan_count = np.isnan(X.select_dtypes(include=[np.number]).values).sum()
+                if X_nan_count > 0:
+                    print(f"Warning: X contains {X_nan_count} NaN values.")
+                    nan_cols = X.columns[X.isna().any()].tolist()
+                    print(f"Columns with NaN: {nan_cols}")
+                    # Handle the issue by filling with median values
+                    for col in nan_cols:
+                        if X[col].dtype in [np.float32, np.float64, np.int32, np.int64]:
+                            median_val = X[col].median()
+                            if pd.isna(median_val):
+                                X[col] = X[col].fillna(0.0)
+                            else:
+                                X[col] = X[col].fillna(median_val)
+                        else:
+                            mode_val = X[col].mode()
+                            fill_val = mode_val.iloc[0] if not mode_val.empty else 0
+                            X[col] = X[col].fillna(fill_val)
+                    print("✓ NaN values in X have been handled")
+                    data_issues_fixed += 1
+                
+                X_inf_count = np.isinf(X.select_dtypes(include=[np.number]).values).sum()
+                if X_inf_count > 0:
+                    print(f"Warning: X contains {X_inf_count} Inf values.")
+                    # Replace Inf values
+                    numeric_cols = X.select_dtypes(include=[np.number]).columns
+                    X[numeric_cols] = X[numeric_cols].replace([np.inf, -np.inf], np.nan)
+                    # Fill the new NaN values created from Inf replacement
+                    for col in numeric_cols:
+                        if X[col].isna().any():
+                            median_val = X[col].median()
+                            if pd.isna(median_val):
+                                X[col] = X[col].fillna(0.0)
+                            else:
+                                X[col] = X[col].fillna(median_val)
+                    print("✓ Inf values in X have been handled")
+                    data_issues_fixed += 1
+                
+                # Check for NaN and Inf values in y
+                y_nan_count = np.isnan(y).sum() if y.dtype in [np.float32, np.float64] else 0
+                if y_nan_count > 0:
+                    print(f"Warning: y contains {y_nan_count} NaN values.")
+                    # This should not happen if data preparation worked correctly
+                    valid_mask = ~np.isnan(y)
+                    X, y, groups = X[valid_mask], y[valid_mask], groups[valid_mask]
+                    sample_weights = sample_weights[valid_mask] if sample_weights is not None else None
+                    print(f"✓ Removed {(~valid_mask).sum()} samples with NaN labels")
+                    validation_errors.append(f"Removed {(~valid_mask).sum()} samples with NaN labels")
+                
+                y_inf_count = np.isinf(y).sum() if y.dtype in [np.float32, np.float64] else 0
+                if y_inf_count > 0:
+                    print(f"Warning: y contains {y_inf_count} Inf values.")
+                    # This should not happen with label encoding, but handle it
+                    valid_mask = ~np.isinf(y)
+                    X, y, groups = X[valid_mask], y[valid_mask], groups[valid_mask]
+                    sample_weights = sample_weights[valid_mask] if sample_weights is not None else None
+                    print(f"✓ Removed {(~valid_mask).sum()} samples with Inf labels")
+                    validation_errors.append(f"Removed {(~valid_mask).sum()} samples with Inf labels")
+                
+                # Check sample_weights
+                if sample_weights is not None:
+                    sw_nan_count = np.isnan(sample_weights).sum()
+                    sw_inf_count = np.isinf(sample_weights).sum()
+                    sw_nonpos_count = (sample_weights <= 0).sum()
+                    
+                    if sw_nan_count > 0 or sw_inf_count > 0:
+                        print(f"Warning: sample_weights contains {sw_nan_count} NaN and {sw_inf_count} Inf values.")
+                        # Recalculate sample weights to be safe
+                        sample_weights = np.array([class_weights[label] for label in y])
+                        print("✓ Sample weights have been recalculated")
+                        data_issues_fixed += 1
+                    
+                    # Ensure sample weights are positive
+                    if sw_nonpos_count > 0:
+                        print(f"Warning: sample_weights contains {sw_nonpos_count} non-positive values.")
+                        sample_weights = np.abs(sample_weights)
+                        sample_weights[sample_weights == 0] = 1e-6
+                        print("✓ Sample weights have been made positive")
+                        data_issues_fixed += 1
+                
+                # Final validation summary
+                print(f"\n--- Data Validation Summary ---")
+                print(f"✓ Final data shape: {X.shape}")
+                print(f"✓ Data types: {X.dtypes.value_counts().to_dict()}")
+                print(f"✓ Labels shape: {y.shape}, unique values: {len(np.unique(y))}")
+                print(f"✓ Sample weights shape: {sample_weights.shape if sample_weights is not None else 'None'}")
+                print(f"✓ Memory usage: {X.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
+                print(f"✓ Issues detected and fixed: {data_issues_fixed}")
+                
+                if validation_errors:
+                    print(f"⚠  Validation warnings: {len(validation_errors)}")
+                    for error in validation_errors:
+                        print(f"   - {error}")
+                
+                # Check data ranges for potential issues
+                numeric_data = X.select_dtypes(include=[np.number])
+                if len(numeric_data.columns) > 0:
+                    data_min = numeric_data.min().min()
+                    data_max = numeric_data.max().max()
+                    print(f"✓ Numeric data range: {data_min:.6f} to {data_max:.6f}")
+                    
+                    if abs(data_min) > 1e6 or abs(data_max) > 1e6:
+                        print("⚠  Warning: Data contains very large values that might cause numerical issues")
+                        print("   Consider additional preprocessing if training fails")
+                
+                # Final data integrity check
+                final_X_nan = np.isnan(X.select_dtypes(include=[np.number]).values).sum()
+                final_X_inf = np.isinf(X.select_dtypes(include=[np.number]).values).sum()
+                final_y_issues = np.isnan(y).sum() + (np.isinf(y).sum() if y.dtype in [np.float32, np.float64] else 0)
+                final_sw_issues = 0
+                if sample_weights is not None:
+                    final_sw_issues = np.isnan(sample_weights).sum() + np.isinf(sample_weights).sum() + (sample_weights <= 0).sum()
+                
+                total_issues = final_X_nan + final_X_inf + final_y_issues + final_sw_issues
+                
+                if total_issues == 0:
+                    print("✅ All data validation checks passed - proceeding with training")
+                else:
+                    print(f"❌ Still have {total_issues} data issues after validation!")
+                    print(f"   X: {final_X_nan} NaN, {final_X_inf} Inf")
+                    print(f"   y: {final_y_issues} issues")
+                    print(f"   sample_weights: {final_sw_issues} issues")
+                
+                print("---")
+                print("Starting XGBoost training...")
+                
                 search.fit(X, y, groups=groups, sample_weight=sample_weights)
                 print("✓ XGBoost hyperparameter search completed successfully")
                 
             except MemoryError as e:
                 print(f"❌ XGBoost training failed: OUT OF MEMORY")
+                print(f"   Data shape: {X.shape}")
+                print(f"   Memory usage: {X.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
                 print(f"   Try reducing batch_size or cv_folds in config")
+                print(f"   Available memory: {psutil.virtual_memory().available / 1024**3:.1f} GB")
                 raise e
                 
             except Exception as e:
@@ -336,6 +508,30 @@ class XGBoostClassifier:
                 print(f"   Data shape: {X.shape}")
                 print(f"   Memory usage: {X.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
                 print(f"   Feature types: {X.dtypes.value_counts()}")
+                
+                # Additional debugging information
+                numeric_data = X.select_dtypes(include=[np.number])
+                if len(numeric_data.columns) > 0:
+                    print(f"   Numeric data stats:")
+                    print(f"     - Min: {numeric_data.min().min()}")
+                    print(f"     - Max: {numeric_data.max().max()}")
+                    print(f"     - NaN count: {numeric_data.isna().sum().sum()}")
+                    print(f"     - Inf count: {np.isinf(numeric_data.values).sum()}")
+                
+                print(f"   Labels stats:")
+                print(f"     - Shape: {y.shape}")
+                print(f"     - Unique values: {len(np.unique(y))}")
+                print(f"     - Data type: {y.dtype}")
+                print(f"     - NaN count: {np.isnan(y).sum() if y.dtype in [np.float32, np.float64] else 0}")
+                
+                if sample_weights is not None:
+                    print(f"   Sample weights stats:")
+                    print(f"     - Shape: {sample_weights.shape}")
+                    print(f"     - Min: {sample_weights.min()}")
+                    print(f"     - Max: {sample_weights.max()}")
+                    print(f"     - NaN count: {np.isnan(sample_weights).sum()}")
+                    print(f"     - Inf count: {np.isinf(sample_weights).sum()}")
+                
                 return {
                         'mean': 0.0,
                         'sem': 0.0, 
@@ -343,9 +539,7 @@ class XGBoostClassifier:
                         'best_params': {},
                         'error': str(e),
                         'failed': True
-                    }
-
-                # raise e            
+                    }            
             self.model = search.best_estimator_
             
             # Calculate CV scores
