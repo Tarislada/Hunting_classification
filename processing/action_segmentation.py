@@ -14,6 +14,10 @@ import warnings
 import gc
 import psutil
 import os
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.model_selection import cross_val_predict
+
 warnings.filterwarnings('ignore')
 
 class MemoryOptimizedFeatureEngineer:
@@ -87,6 +91,26 @@ class MemoryOptimizedFeatureEngineer:
             df['is_cricket_visible'] = (~df['cricket_use_nose_position']).astype('int8')
         if 'zone' in df.columns:
             df['cricket_in_binocular'] = (df['zone'] == 'binocular').astype('int8')
+        if self.sequential_lags and self.sequential_features:
+            print(f"Creating lag features for lags: {self.sequential_lags}...")
+            # Group by trial to prevent data leakage across trials
+            grouped = df.groupby(['animal_id', 'trial_id'])
+            for col in self.sequential_features:
+                if col in df.columns:
+                    # Check if the original column is numeric before trying to cast to float
+                    is_numeric = pd.api.types.is_numeric_dtype(df[col])
+                    
+                    for lag in self.sequential_lags:
+                        lag_col_name = f'{col}_lag_{lag}'
+                        # Use shift() within each group to create the lag feature
+                        shifted = grouped[col].shift(lag)
+                        
+                        if is_numeric:
+                            df[lag_col_name] = shifted.astype('float32')
+                        else:
+                            # For categorical columns like 'zone', don't cast to float.
+                            # The NaNs introduced by shift() will be handled later.
+                            df[lag_col_name] = shifted
         
         # LIMITED rolling features (only most important)
         priority_features = ['head_angle', 'cricket_angle', 'distance', 'relative_angle']
@@ -153,7 +177,10 @@ class MemoryOptimizedDataPreparator:
         for feat_file, label_file in zip(feature_files, label_files):
             try:
                 # Extract animal ID from filename
-                animal_id = Path(feat_file).stem.split('_')[0]
+                # animal_id = Path(feat_file).stem.split('_')[0]
+                parts = Path(feat_file).stem.replace('_validated', '').replace('_analysis', '').split('_')
+                animal_id = parts[0]
+                trial_id = parts[1] if len(parts) > 1 else 'unknown'
                 
                 # Load data with memory optimization
                 features = pd.read_csv(feat_file, dtype={'frame': 'int32'})
@@ -162,7 +189,8 @@ class MemoryOptimizedDataPreparator:
                 # Align by frame
                 merged = pd.merge(features, labels, on='frame', how='inner')
                 merged['animal_id'] = animal_id
-                
+                merged['trial_id'] = trial_id
+                                
                 # Basic cleaning
                 merged = merged.dropna(subset=['behavior'])  # Remove rows without labels
                 
@@ -184,6 +212,7 @@ class MemoryOptimizedDataPreparator:
         # Get feature columns
         feature_cols = feature_engineer.get_feature_names(data_engineered)
         print(f"Using {len(feature_cols)} features (including sequential)")
+        # identifiers_df = data_engineered[['animal_id', 'trial_id', 'frame']].copy()
         
         # Prepare X and y
         X = data_engineered[feature_cols].copy()
@@ -223,7 +252,7 @@ class MemoryOptimizedDataPreparator:
         X = self._handle_missing_values_efficient(X)
         
         # Feature selection to reduce dimensionality
-        X_selected = self._select_important_features(X, y_encoded, max_features=60)  # Increased slightly for sequential features
+        X_selected = self._select_important_features(X, y_encoded, max_features=40)  # Increased slightly for sequential features
         
         # Scale only numeric features
         numeric_cols = X_selected.select_dtypes(include=[np.number]).columns
@@ -289,7 +318,7 @@ class LightweightClassifier:
         self.best_models = {}
         self.feature_importance = {}
         
-    def train_multiple_models(self, X, y, groups, cv_splits, class_weights=None):
+    def train_multiple_models(self, X, y, groups, cv_splits, target_encoder, class_weights=None):
         """Train multiple models efficiently"""
         classes = np.unique(y)
 
@@ -304,6 +333,20 @@ class LightweightClassifier:
         print(f"Applying class weights: {class_weights}")
         sample_weights = np.array([class_weights[label] for label in y])
         
+        try:
+            attack_label = np.where(target_encoder.classes_ == 'attack')[0][0]
+            non_visual_rotation_label = np.where(target_encoder.classes_ == 'non_visual_rotation')[0][0]
+            
+            sampling_strategy = {
+                attack_label: 18000,
+                non_visual_rotation_label: 20000
+            }
+            print(f"Using custom SMOTE sampling strategy: {sampling_strategy}")
+        except (IndexError, AttributeError):
+            print("Could not define custom sampling strategy. Defaulting to SMOTE's auto strategy.")
+            sampling_strategy = 'auto'
+
+        
         # Define models with reduced hyperparameter grids
         model_configs = {
             # 'rf': {
@@ -317,45 +360,61 @@ class LightweightClassifier:
             'xgb': {
                 'model': XGBClassifier(random_state=self.random_state, eval_metric='mlogloss'),
                 'params': {
-                    'n_estimators': [100, 200],
-                    'max_depth': [3, 6],
-                    'learning_rate': [0.1, 0.2]
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 4, 5],
+                    'learning_rate': [0.05, 0.1],
+                    'subsample': [0.7, 0.8, 0.9],       # Add subsampling
+                    'colsample_bytree': [0.7, 0.8, 0.9],# Add feature sampling
+                    'gamma': [0, 0.1, 0.2],             # Add gamma for pruning
+                    'reg_alpha': [0, 0.01, 0.1],        # Add L1 regularization
+                    'reg_lambda': [1, 1.5]              # Add L2 regularization
                 },
                 'use_sample_weight': True
             },
-        #     'lr': {
-        #         'model': LogisticRegression(random_state=self.random_state, class_weight=class_weights, max_iter=1000),
-        #         'params': {
-        #             'C': [0.1, 1, 10],
-        #             'penalty': ['l2']  # Simplified to avoid solver issues
-        #         }
-        #     }
         }
         
         scores = {}
         
         for model_name, config in model_configs.items():
             print(f"\nTraining {model_name}...")
+            # --- MODIFIED: Integrate SMOTE into the training pipeline ---
+            # Create a pipeline that first applies SMOTE, then fits the model.
+            # This ensures SMOTE is only applied to the training data within each CV fold.
+            smote = SMOTE(
+                sampling_strategy=sampling_strategy, 
+                random_state=self.random_state, 
+                k_neighbors=3
+            )
             
+            # Use the imblearn pipeline
+            model_pipeline = ImbPipeline([
+                ('smote', smote),
+                ('classifier', config['model'])
+            ])
+
             try:
                 # Hyperparameter tuning with reduced iterations
                 search = RandomizedSearchCV(
-                    config['model'],
-                    config['params'],
+                    # config['model'],
+                    # config['params'],
+                    model_pipeline,  # Use the SMOTE pipeline here
+                    {'classifier__' + k: v for k, v in config['params'].items()}, # Adjust param grid keys
                     cv=cv_splits,
                     scoring='f1_macro',
-                    n_iter=6,  # Reduced iterations for speed
+                    n_iter=20,  # Reduced iterations for speed
                     random_state=self.random_state,
                     n_jobs=-1,
                     error_score='raise'
                 )
                 # --- MODIFIED: Pass sample_weight to fit if required by the model ---
-                fit_params = {}
-                if config.get('use_sample_weight', False):
-                    print(f"Passing sample_weight to {model_name}.fit()")
-                    fit_params['sample_weight'] = sample_weights
+                # fit_params = {}
+                # if config.get('use_sample_weight', False):
+                #     print(f"Passing sample_weight to {model_name}.fit()")
+                #     # fit_params['sample_weight'] = sample_weights
+                #     fit_params['classifier__sample_weight'] = sample_weights
 
-                search.fit(X, y, groups=groups, **fit_params)
+                # search.fit(X, y, groups=groups, **fit_params)
+                search.fit(X, y, groups=groups)
                 self.best_models[model_name] = search.best_estimator_
                 
                 best_index = search.best_index_
@@ -577,8 +636,8 @@ class LightweightBehavioralPipeline:
         self.evaluator = SimpleEvaluator()
         self.batch_size = batch_size
         self.class_weight = class_weight
-        
-    def run_pipeline(self, feature_files, label_files, cv_folds=3):
+
+    def run_pipeline(self, feature_files, label_files, cv_folds=3, output_csv_path="predictions.csv"):
         """Run the lightweight pipeline"""
         print("=== MEMORY-OPTIMIZED BEHAVIORAL CLASSIFICATION PIPELINE ===")
         
@@ -600,6 +659,7 @@ class LightweightBehavioralPipeline:
         
         # Prepare data
         print("Preparing features...")
+        identifiers_df = data[['animal_id', 'trial_id', 'frame']].copy()
         X, y, groups, feature_cols = self.data_preparator.prepare_data(data, self.feature_engineer)
         
         print(f"Final feature matrix shape: {X.shape}")
@@ -630,12 +690,8 @@ class LightweightBehavioralPipeline:
         
         # Train model
         print("Training models...")
-        scores = self.classifier.train_multiple_models(X, y, groups, cv_splits, class_weights=model_class_weights)
-        
-        # Evaluate all models
-        print("Evaluating models...")
-        results = {}
-        
+        scores = self.classifier.train_multiple_models(X, y, groups, cv_splits, self.data_preparator.target_encoder, class_weights=model_class_weights)
+
         # Evaluate all models
         print("Evaluating models...")
         results = {}
@@ -687,6 +743,22 @@ class LightweightBehavioralPipeline:
                 groups=groups, show_plot=True, num_plot_trials=3
             )
         
+            # --- ADDED: Save predictions to CSV ---
+            print(f"\nSaving predictions from best model ({best_individual}) to {output_csv_path}...")
+            
+            # Get the original identifiers that correspond to the data used for training/prediction
+            output_df = identifiers_df.loc[X.index].copy()
+            
+            # Decode the numeric predictions back to string labels
+            predicted_labels_str = self.data_preparator.target_encoder.inverse_transform(y_pred_best)
+            output_df['behavior'] = predicted_labels_str
+            
+            # Ensure correct order and save
+            output_df = output_df[['animal_id', 'trial_id', 'frame', 'behavior']]
+            output_df.to_csv(output_csv_path, index=False)
+            print(f"✓ Predictions successfully saved.")
+
+        
         return {
             'data_shape': data.shape,
             'feature_shape': X.shape,
@@ -701,7 +773,7 @@ if __name__ == "__main__":
     # Define file paths - UPDATE THESE PATHS
     feature_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/test_val_vid5")
     label_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/Behavior_label")
-    
+    output_path = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/Behavior_Predictions.csv")
     # --- This block automatically finds and pairs your files ---
     feature_files = []
     label_files = []
@@ -739,8 +811,8 @@ if __name__ == "__main__":
             'zone'  # Important for behavioral context
         ],
         class_weight={
-            'attack': 1.2,
-            'non_visual_rotation': 1.0,
+            'attack': 1.15,
+            'non_visual_rotation': 1.05,
             'chasing': 0.94,
             'background': 1.0
         }
@@ -754,9 +826,9 @@ if __name__ == "__main__":
         print("- Behavioral transition detection (zone changes, direction consistency)")
         print("- Memory-optimized processing")
         print("- Sequence visualization comparing true vs predicted behaviors")
-        
-        results = pipeline.run_pipeline(feature_files, label_files, cv_folds=3)
-        
+
+        results = pipeline.run_pipeline(feature_files, label_files, cv_folds=3, output_csv_path=output_path)
+
         if results:
             print(f"\n=== FINAL RESULTS ===")
             print(f"Data processed: {results['data_shape']}")

@@ -24,10 +24,11 @@ class DirectoryPaths:
     cricket_processed_dir: str = "SKH_FP/FInalized_process/cricket_process_test5"
 
     # Output directories
-    # final_videos_dir: str = "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/test_val_vid5"
-    final_videos_dir:str = "/home/tarislada/Documents/Hunting_classification/SKH_FP/FInalized_process/test_val_vid5"
+    final_videos_dir: str = "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/test_val_vid5"
+    # final_videos_dir:str = "/home/tarislada/Documents/Hunting_classification/SKH_FP/FInalized_process/test_val_vid5"
     # final_videos_dir:str = "SKH_FP/FInalized_process/test_val_vid5"
-    behavior_labels_dir: str = "SKH_FP/FInalized_process/Behavior_label"
+    # behavior_labels_dir: str = "SKH_FP/FInalized_process/Behavior_label"
+    behavior_labels_dir: str = "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/Behavior_label"
     visualization_dir: str = "SKH_FP/FInalized_process/data_visualization1"
 
     def __post_init__(self):
