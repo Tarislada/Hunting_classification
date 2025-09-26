@@ -108,12 +108,18 @@ class TimingValidator:
         # Extract hunting duration (last frame of hunting sequence)
         # This could be last attack frame, or we could define it differently
         # For now, let's use the last frame where behavior is not 'background'
-        hunting_frames = trial_data[trial_data['behavior'] != 'background']
-        if len(hunting_frames) > 0:
-            timing_events['hunting_duration'] = hunting_frames['frame'].max()
+        # hunting_frames = trial_data[trial_data['behavior'] != 'background']
+        # # TODO: what if we do it as last attack frame?
+        # if len(hunting_frames) > 0:
+        #     timing_events['hunting_duration'] = hunting_frames['frame'].max()
+        # else:
+        #     timing_events['hunting_duration'] = None
+        if len(attack_frames) > 0:
+            timing_events['hunting_duration'] = attack_frames['frame'].max()+1
         else:
+            # If there are no attack frames, the duration event is also considered missing.
             timing_events['hunting_duration'] = None
-        
+                
         return timing_events
     
     def load_pipeline_results(self, results_directory: str) -> pd.DataFrame:

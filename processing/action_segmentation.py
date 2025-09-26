@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GroupKFold, RandomizedSearchCV
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, make_scorer, f1_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBClassifier
@@ -14,6 +14,13 @@ import warnings
 import gc
 import psutil
 import os
+
+try:
+    import pywt
+    PYWT_AVAILABLE = True
+except ImportError:
+    PYWT_AVAILABLE = False
+
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
 from sklearn.model_selection import cross_val_predict
@@ -85,12 +92,69 @@ class MemoryOptimizedFeatureEngineer:
         # Essential behavioral features
         if 'cricket_angle' in df.columns and 'head_angle' in df.columns:
             df['relative_angle'] = (df['cricket_angle'] - df['head_angle']).astype('float32')
+            # Also calculate velocity for relative_angle
+            df['relative_angle_velocity'] = df['relative_angle'].diff().astype('float32')
         
+        # --- NEW: Add acceleration features (2nd derivative) ---
+        # These features spike during rapid changes in movement.
+        acceleration_cols = ['head_angle_velocity', 'distance_velocity', 'relative_angle_velocity']
+        for col in acceleration_cols:
+            if col in df.columns:
+                df[f'{col.replace("_velocity", "_acceleration")}'] = df[col].diff().astype('float32')
+
+        # --- NEW: Add change-point detection features ---
+        # These measure the magnitude of change over different time windows.
+        change_point_cols = ['distance', 'head_angle', 'relative_angle']
+        for col in change_point_cols:
+            if col in df.columns:
+                for window in [3, 5, 10]:
+                    df[f'{col}_change_{window}'] = (df[col] - df[col].shift(window)).astype('float32')
+        
+        # --- NEW: Add zero-crossing / direction change features ---
+        # This counts how "jerky" or "indecisive" the movement is.
+        if 'relative_angle' in df.columns:
+            df['direction_changes_10'] = (np.sign(df['relative_angle'].diff()).diff() != 0).rolling(10).sum().astype('float32')
+
         # Binary behavioral indicators
         if 'cricket_use_nose_position' in df.columns:
             df['is_cricket_visible'] = (~df['cricket_use_nose_position']).astype('int8')
         if 'zone' in df.columns:
             df['cricket_in_binocular'] = (df['zone'] == 'binocular').astype('int8')
+        if PYWT_AVAILABLE:
+            print("Adding wavelet features...")
+            wavelet_cols = ['distance', 'relative_angle']
+            wavelet = 'db4' # A common choice for transient signal analysis
+            
+            for col in wavelet_cols:
+                if col in df.columns:
+                    # Define a function to apply to each trial group
+                    def get_wavelet_features(group):
+                        series = group[col].fillna(0) # Fill NaNs within the group for transform
+                        
+                        # The transform requires a minimum length. Skip if too short.
+                        if len(series) < 20: 
+                            return group
+                        
+                        # Decompose the signal
+                        try:
+                            coeffs = pywt.wavedec(series, wavelet, level=3)
+                            # cA3, cD3, cD2, cD1
+                            
+                            # Reconstruct features and align them with the original index
+                            # Energy of detail coefficients (high and mid-frequency)
+                            group[f'{col}_dwt_d1_energy'] = pd.Series(np.square(coeffs[-1])).rolling(15, min_periods=1).mean().reindex(group.index, method='bfill').astype('float32')
+                            group[f'{col}_dwt_d2_energy'] = pd.Series(np.square(coeffs[-2])).rolling(15, min_periods=1).mean().reindex(group.index, method='bfill').astype('float32')
+                        except ValueError as e:
+                            # This can happen if a trial is too short for the chosen level
+                            # print(f"Wavelet transform failed for a group in '{col}': {e}")
+                            pass # Leave columns as NaN, they will be imputed later
+                        return group
+
+                    # Apply the function to each trial group
+                    df = df.groupby(['animal_id', 'trial_id'], group_keys=False).apply(get_wavelet_features)
+        else:
+            print("Warning: PyWavelets is not installed. Skipping wavelet feature generation.")
+
         if self.sequential_lags and self.sequential_features:
             print(f"Creating lag features for lags: {self.sequential_lags}...")
             # Group by trial to prevent data leakage across trials
@@ -252,7 +316,8 @@ class MemoryOptimizedDataPreparator:
         X = self._handle_missing_values_efficient(X)
         
         # Feature selection to reduce dimensionality
-        X_selected = self._select_important_features(X, y_encoded, max_features=40)  # Increased slightly for sequential features
+        # X_selected = self._select_important_features(X, y_encoded, max_features=40)  # Increased slightly for sequential features
+        X_selected = X
         
         # Scale only numeric features
         numeric_cols = X_selected.select_dtypes(include=[np.number]).columns
@@ -322,6 +387,25 @@ class LightweightClassifier:
         """Train multiple models efficiently"""
         classes = np.unique(y)
 
+        # --- NEW: Create a custom scorer that focuses only on action classes ---
+        try:
+            action_class_names = ['attack', 'chasing', 'non_visual_rotation']
+            # Get the integer labels for our action classes
+            action_labels = [i for i, cls in enumerate(target_encoder.classes_) if cls in action_class_names]
+            
+            if len(action_labels) == len(action_class_names):
+                print(f"Creating custom scorer focusing on labels: {action_class_names} (indices: {action_labels})")
+                # This scorer calculates the macro F1 score for only the specified labels
+                custom_scorer = make_scorer(f1_score, average='macro', labels=action_labels)
+                scoring_metric = custom_scorer
+            else:
+                print("Could not find all action classes in encoder. Defaulting to 'f1_macro'.")
+                scoring_metric = 'f1_macro'
+        except Exception as e:
+            print(f"Failed to create custom scorer: {e}. Defaulting to 'f1_macro'.")
+            scoring_metric = 'f1_macro'
+        # --- END NEW BLOCK ---
+
         # Calculate class weights
         if class_weights is None:
             print("No class weights provided, calculating balanced weights as default.")
@@ -338,8 +422,8 @@ class LightweightClassifier:
             non_visual_rotation_label = np.where(target_encoder.classes_ == 'non_visual_rotation')[0][0]
             
             sampling_strategy = {
-                attack_label: 18000,
-                non_visual_rotation_label: 20000
+                attack_label: 7000, #10000, #15000
+                non_visual_rotation_label: 12500 #10000 #17000
             }
             print(f"Using custom SMOTE sampling strategy: {sampling_strategy}")
         except (IndexError, AttributeError):
@@ -360,14 +444,14 @@ class LightweightClassifier:
             'xgb': {
                 'model': XGBClassifier(random_state=self.random_state, eval_metric='mlogloss'),
                 'params': {
-                    'n_estimators': [100, 200, 300],
+                    'n_estimators': [150, 200],
                     'max_depth': [3, 4, 5],
-                    'learning_rate': [0.05, 0.1],
-                    'subsample': [0.7, 0.8, 0.9],       # Add subsampling
-                    'colsample_bytree': [0.7, 0.8, 0.9],# Add feature sampling
-                    'gamma': [0, 0.1, 0.2],             # Add gamma for pruning
-                    'reg_alpha': [0, 0.01, 0.1],        # Add L1 regularization
-                    'reg_lambda': [1, 1.5]              # Add L2 regularization
+                    'learning_rate': [0.075, 0.1],
+                    'subsample': [0.8, 0.9, 0.95],       # Add subsampling
+                    'colsample_bytree': [0.4, 0.5, 0.6],# Add feature sampling
+                    'gamma': [0, 0.01, 0.1],             # Add gamma for pruning
+                    'reg_alpha': [0.01, 0.05, 0.1],        # Add L1 regularization
+                    'reg_lambda': [1.25, 1.5, 1.75]              # Add L2 regularization
                 },
                 'use_sample_weight': True
             },
@@ -400,7 +484,8 @@ class LightweightClassifier:
                     model_pipeline,  # Use the SMOTE pipeline here
                     {'classifier__' + k: v for k, v in config['params'].items()}, # Adjust param grid keys
                     cv=cv_splits,
-                    scoring='f1_macro',
+                    # scoring='f1_macro',
+                    scoring = scoring_metric,
                     n_iter=20,  # Reduced iterations for speed
                     random_state=self.random_state,
                     n_jobs=-1,
@@ -691,72 +776,62 @@ class LightweightBehavioralPipeline:
         # Train model
         print("Training models...")
         scores = self.classifier.train_multiple_models(X, y, groups, cv_splits, self.data_preparator.target_encoder, class_weights=model_class_weights)
+        results = {}
 
         # Evaluate all models
-        print("Evaluating models...")
-        results = {}
-        
-        # Evaluate individual models
-        for model_name in self.classifier.best_models.keys():
-            y_pred = self.classifier.predict(X, model_name)
-            report, cm = self.evaluator.evaluate_model(y, y_pred, self.data_preparator.target_encoder, show_plot=False)
+        for model_name, best_pipeline in self.classifier.best_models.items():
+            print(f"\n--- Evaluating {model_name.upper()} ---")
+            
+            # --- Generate predictions ONCE ---
+            y_pred_in_sample = best_pipeline.predict(X)
+            y_pred_cv = cross_val_predict(best_pipeline, X, y, cv=cv_splits, n_jobs=-1, groups=groups)
+
+            # --- 1. Evaluate and Display CROSS-VALIDATION Results (The 'Real' Score) ---
+            print("\n--- CROSS-VALIDATION PERFORMANCE (The 'Real' Score) ---")
+            report_cv, cm_cv = self.evaluator.evaluate_model(
+                y, y_pred_cv, self.data_preparator.target_encoder, show_plot=True, num_plot_trials=0
+            )
+
+            # --- 2. Evaluate and Display IN-SAMPLE Results (Memorization Score) ---
+            print("\n--- IN-SAMPLE PERFORMANCE (Memorization Score) ---")
+            report_in_sample, cm_in_sample = self.evaluator.evaluate_model(
+                y, y_pred_in_sample, self.data_preparator.target_encoder, show_plot=True, num_plot_trials=0
+            )
+
+            # Store results
             results[model_name] = {
                 'cv_score_mean': scores.get(model_name, {}).get('mean', 0),
                 'cv_score_sem': scores.get(model_name, {}).get('sem', 0),
-                'classification_report': report,
-                'confusion_matrix': cm
+                'in_sample_report': report_in_sample,
+                'cv_report': report_cv,
             }
-            print(f"\n{model_name.upper()} Results:")
-            print(f"CV Score: {results[model_name]['cv_score_mean']:.4f} ± {results[model_name]['cv_score_sem']:.4f} (SEM)")
-            print(f"In-sample Accuracy: {report['accuracy']:.4f}")
-            print(f"In-sample Macro F1: {report['macro avg']['f1-score']:.4f}")
+
+        # --- This section is now simplified ---
+        # Find best model based on CV F1 score
+        best_model_name = max(results.keys(), key=lambda k: (results[k]['cv_report'] or {}).get('macro avg', {}).get('f1-score', 0))
         
-        # Evaluate ensemble if available
-        if hasattr(self.classifier, 'ensemble'):
-            y_pred_ensemble = self.classifier.predict(X, 'ensemble')
-            # --- MODIFIED: Pass groups to the evaluator ---
-            report_ensemble, cm_ensemble = self.evaluator.evaluate_model(
-                y, y_pred_ensemble, self.data_preparator.target_encoder, 
-                groups=groups, show_plot=True, num_plot_trials=3
-            )
-            avg_cv_mean = np.mean([s['mean'] for s in scores.values()])
-            avg_cv_sem = np.mean([s['sem'] for s in scores.values()]) # Note: This is a simplification
-
-            results['ensemble'] = {
-                'cv_score_mean': avg_cv_mean,
-                'cv_score_sem': avg_cv_sem,
-                'classification_report': report_ensemble,
-                'confusion_matrix': cm_ensemble
-            }
-            print(f"\nENSEMBLE Results:")
-            print(f"In-sample Accuracy: {report_ensemble['accuracy']:.4f}")
-            print(f"In-sample Macro F1: {report_ensemble['macro avg']['f1-score']:.4f}")
-
-        elif self.classifier.best_models:
-            # If no ensemble, show plot for best individual model
-            best_individual = max(results.keys(), key=lambda x: results[x]['classification_report']['macro avg']['f1-score'])
-            y_pred_best = self.classifier.predict(X, best_individual)
-            # --- MODIFIED: Pass groups to the evaluator ---
-            print(f"\nShowing sequence plots for best individual model: {best_individual}")
+        if results[best_model_name]['cv_report'] is not None:
+            print(f"\nBest model based on CV Macro F1: {best_model_name}")
+            # Re-generate CV predictions for the sequence plot (this is quick as it's just one model)
+            y_pred_best_cv = cross_val_predict(self.classifier.best_models[best_model_name], X, y, cv=cv_splits, n_jobs=-1, groups=groups)
+            print(f"\nShowing sequence plots for best model's CV predictions: {best_model_name}")
             self.evaluator.evaluate_model(
-                y, y_pred_best, self.data_preparator.target_encoder, 
+                y, y_pred_best_cv, self.data_preparator.target_encoder, 
                 groups=groups, show_plot=True, num_plot_trials=3
             )
-        
-            # --- ADDED: Save predictions to CSV ---
-            print(f"\nSaving predictions from best model ({best_individual}) to {output_csv_path}...")
-            
-            # Get the original identifiers that correspond to the data used for training/prediction
-            output_df = identifiers_df.loc[X.index].copy()
-            
-            # Decode the numeric predictions back to string labels
-            predicted_labels_str = self.data_preparator.target_encoder.inverse_transform(y_pred_best)
-            output_df['behavior'] = predicted_labels_str
-            
-            # Ensure correct order and save
-            output_df = output_df[['animal_id', 'trial_id', 'frame', 'behavior']]
-            output_df.to_csv(output_csv_path, index=False)
-            print(f"✓ Predictions successfully saved.")
+        else:
+            print("Could not determine best model as CV reports are missing.")
+
+        # --- Save predictions to CSV using the final model trained on all data ---
+        final_model_to_save = self.classifier.best_models[best_model_name]
+        y_pred_final = final_model_to_save.predict(X)
+        print(f"\nSaving final predictions from best model ({best_model_name}) to {output_csv_path}...")
+        output_df = identifiers_df.loc[X.index].copy()
+        predicted_labels_str = self.data_preparator.target_encoder.inverse_transform(y_pred_final)
+        output_df['behavior'] = predicted_labels_str
+        output_df = output_df[['animal_id', 'trial_id', 'frame', 'behavior']]
+        output_df.to_csv(output_csv_path, index=False)
+        print(f"✓ Predictions successfully saved.")
 
         
         return {
@@ -835,32 +910,40 @@ if __name__ == "__main__":
             print(f"Features used: {results['feature_shape'][1]} (including sequential)")
             
             # Show best model
-            best_model = None
-            best_f1 = 0
+            best_model_name = None
+            best_cv_f1 = 0
             
             for model_name, model_results in results['results'].items():
-                f1_score = model_results['classification_report']['macro avg']['f1-score']
-                cv_mean = model_results['cv_score_mean']
-                cv_sem = model_results['cv_score_sem']
-                print(f"{model_name}: CV F1={cv_mean:.4f} ± {cv_sem:.4f}, In-sample F1={f1_score:.4f}")
+                # Safely get the in-sample F1 score
+                in_sample_f1 = model_results.get('in_sample_report', {}).get('macro avg', {}).get('f1-score', 0)
                 
-                if f1_score > best_f1:
-                    best_f1 = f1_score
-                    best_model = model_name
+                # Safely get the CV F1 score from the detailed report
+                cv_f1 = model_results.get('cv_report', {}).get('macro avg', {}).get('f1-score', 0)
+                
+                # Use the simple mean score from RandomizedSearchCV as a fallback
+                cv_mean = model_results.get('cv_score_mean', 0)
+                cv_sem = model_results.get('cv_score_sem', 0)
+
+                print(f"{model_name}: CV F1={cv_f1:.4f} (Search mean: {cv_mean:.4f} ± {cv_sem:.4f}), In-sample F1={in_sample_f1:.4f}")
+                
+                # Determine best model based on the more reliable CV F1 score
+                if cv_f1 > best_cv_f1:
+                    best_cv_f1 = cv_f1
+                    best_model_name = model_name
             
-            print(f"\nBest model: {best_model} (F1: {best_f1:.4f})")
+            print(f"\nBest model based on CV F1: {best_model_name} (CV F1: {best_cv_f1:.4f})")
+
             
             # Show feature importance if available
-            if results.get('feature_importance'):
-                print(f"\nTop 10 features ({best_model}):")
-                if best_model in results['feature_importance']:
-                    top_features = results['feature_importance'][best_model].head(10)
-                    print(top_features)
-                    
-                    # Count sequential features in top 10
-                    sequential_in_top10 = sum(1 for feat in top_features['feature'] 
-                                            if '_lag_' in feat or 'changed' in feat or 'consistent' in feat)
-                    print(f"\nSequential features in top 10: {sequential_in_top10}")
+            if results.get('feature_importance') and best_model_name in results['feature_importance']:
+                print(f"\nTop 10 features ({best_model_name}):")
+                top_features = results['feature_importance'][best_model_name].head(10)
+                print(top_features)
+                
+                # Count sequential features in top 10
+                sequential_in_top10 = sum(1 for feat in top_features['feature'] 
+                                        if '_lag_' in feat)
+                print(f"\nSequential features in top 10: {sequential_in_top10}")
         
     except Exception as e:
         print(f"Pipeline failed: {e}")
