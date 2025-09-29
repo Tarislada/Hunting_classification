@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import GroupKFold, RandomizedSearchCV
+from sklearn.model_selection import GroupKFold, RandomizedSearchCV, LeaveOneGroupOut
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from xgboost import XGBClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -274,7 +274,10 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     print(f"Hyperparameter search: {'Enabled' if hyperparam_search else 'Disabled'}")
     
     # Cross-validation setup
-    cv = GroupKFold(n_splits=3)
+    n_animals = len(np.unique(groups))
+    print(f"\nFound {n_animals} unique animals. Using LeaveOneGroupOut for cross-validation.")
+    cv = GroupKFold(n_splits=4)
+    # cv = LeaveOneGroupOut()
     cv_splits = list(cv.split(X, y, groups))
     
     # Storage for CV results
@@ -285,11 +288,13 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     all_y_test_agg = []
     all_y_pred_agg = []
     
-    print(f"\nRunning 3-fold cross-validation...")
+    print(f"\nRunning 4-fold cross-validation...")
+    # print(f"\nRunning {len(cv_splits)}-fold Leave-One-Group-Out cross-validation...")
     
     for fold, (train_idx, test_idx) in enumerate(cv_splits):
         print(f"\n{'='*40}")
-        print(f"Fold {fold + 1}/3")
+        print(f"Fold {fold + 1}/4")
+        # print(f"Fold {fold + 1}/{n_animals}")
         print('='*40)
         
         X_train, X_test = X[train_idx], X[test_idx]
@@ -312,32 +317,62 @@ def run_experiment(feature_files: List[str], label_files: List[str],
             original_counts = pd.Series(y_train).value_counts().to_dict()
             print(f"Original counts: {original_counts}")
             
-            # 2. Define your target counts
-            # Example: Increase 'attack' and 'non_visual_rotation' without touching others
+            # --- MODIFIED: Update SMOTE strategy for new labels ---
+            # 2. Define your target counts for the new classes
             # Get the integer labels for your classes
-            attack_label = target_encoder.transform(['attack'])[0]
-            rotation_label = target_encoder.transform(['non_visual_rotation'])[0]
+            sampling_strategy = {}
             
-            # Set the desired number of samples for specific classes
-            sampling_strategy = {
-                attack_label: int(original_counts.get(attack_label, 0) * 1.05), # Increase by 1.05x
-                rotation_label: int(original_counts.get(rotation_label, 0) * 1.2) # Increase by 1.2x
-            }
-            # SMOTE will keep other classes as they are.
+            # Safely get labels, only if they exist in the data
+            if 'attack' in target_encoder.classes_:
+                attack_label = target_encoder.transform(['attack'])[0]
+                sampling_strategy[attack_label] = int(original_counts.get(attack_label, 0) * 1.0) # Increase attack
+            
+            if 'chasing' in target_encoder.classes_:
+                chasing_label = target_encoder.transform(['chasing'])[0]
+                sampling_strategy[chasing_label] = int(original_counts.get(chasing_label, 0) * 1.05) # Increase chasing
+            
+            if 'consume' in target_encoder.classes_:
+                consume_label = target_encoder.transform(['consume'])[0]
+                sampling_strategy[consume_label] = int(original_counts.get(consume_label, 0) * 1.15) # Increase consume
+            
+            # SMOTE will keep other classes (like background) as they are.
             
             print(f"SMOTE target strategy: {sampling_strategy}")
             
             # 3. Apply SMOTE with the defined strategy
-            smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
-            X_train_scaled, y_train = smote.fit_resample(X_train_scaled, y_train)
-            print(f"After SMOTE: {X_train_scaled.shape[0]} training samples")
-            print(f"New counts: {pd.Series(y_train).value_counts().to_dict()}")
+            if sampling_strategy:
+                smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
+                X_train_scaled, y_train = smote.fit_resample(X_train_scaled, y_train)
+                print(f"After SMOTE: {X_train_scaled.shape[0]} training samples")
+                print(f"New counts: {pd.Series(y_train).value_counts().to_dict()}")
+            else:
+                print("No target classes for SMOTE found in this fold. Skipping.")
         
         # Calculate sample weights for training
         classes = np.unique(y_train)
+        # Automatic weights (inverse ratio)
         class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
         sample_weights = np.array([class_weights[label] for label in y_train])
+        # manual_weights = {
+        #     'background': 1.86,
+        #     'chasing': 5.69,
+        #     'attack': 7.5,
+        #     'consume': 4.565
+        # }
+
+        # class_weights_dict = {}
+        # for class_name, weight in manual_weights.items():
+        #     if class_name in target_encoder.classes_:
+        #         # Get the integer label for the class name
+        #         class_label = target_encoder.transform([class_name])[0]
+        #         class_weights_dict[class_label] = weight
         
+        # print(f"Using manual class weights: {class_weights_dict}")
+
+        # # 3. Create the final sample_weights array to pass to the model.
+        # #    This maps each sample in the training set to its corresponding weight.
+        # sample_weights = np.array([class_weights_dict.get(label, 1.0) for label in y_train])
+
         # Model selection
         if hyperparam_search:
             print(f"Performing hyperparameter search...")
@@ -573,7 +608,7 @@ def compare_experiments(base_dir: Path, experiment_names: List[str]):
 if __name__ == "__main__":
     # For single experiment
     base_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process")
-    exp_dir = base_dir / "enhanced_4_2"
+    exp_dir = base_dir / "enhanced_6_4"
     
     if exp_dir.exists():
         feature_files = sorted(exp_dir.glob('*_enhanced_features.csv'))
@@ -585,7 +620,7 @@ if __name__ == "__main__":
         results = run_experiment(
             [str(f) for f in feature_files],
             [str(f) for f in label_files],
-            experiment_name="Label Expansion (4 before, 2 after) with SMOTE",
+            experiment_name="Label Expansion (6 before, 4 after) with SMOTE",
             use_smote=True,
             hyperparam_search=True
         )
@@ -598,7 +633,7 @@ if __name__ == "__main__":
         results_no_smote = run_experiment(
             [str(f) for f in feature_files],
             [str(f) for f in label_files],
-            experiment_name="Label Expansion (4 before, 2 after) without SMOTE",
+            experiment_name="Label Expansion (6 before, 4 after) without SMOTE",
             use_smote=False,
             hyperparam_search=True
         )

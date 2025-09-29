@@ -258,8 +258,8 @@ if __name__ == "__main__":
     pose_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/kalman_filtered_w59p7")  # Optional
     
     # Single experiment
-    print("Running single experiment with 4 frames before, 2 frames after...")
-    output_dir = feature_dir.parent / "enhanced_4_2"
+    print("Running single experiment with 6 frames before, 4 frames after...")
+    output_dir = feature_dir.parent / "enhanced_6_4"
     output_dir.mkdir(exist_ok=True)
     
     feature_files = sorted(feature_dir.glob('*_analysis.csv'))
@@ -270,7 +270,7 @@ if __name__ == "__main__":
         if label_path.exists():
             pose_path = pose_dir / f"kalman_filtered_processed_filtered_{base_name}.csv" if pose_dir else None
             process_file_pair(str(feature_path), str(label_path), output_dir, 
-                            before_frames=4, after_frames=2,
+                            before_frames=6, after_frames=4,
                             pose_csv_path=str(pose_path) if pose_path and pose_path.exists() else None)
     
     # Or run multiple experiments
