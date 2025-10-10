@@ -208,6 +208,8 @@ __marimo__/
 
 # Data, Model, and Result Files
 *.csv
+*.xlsx
+*.pth
 *.json
 *.pkl
 *.joblib
