@@ -505,13 +505,13 @@ def process_directory(input_dir: str,
 # Example usage
 if __name__ == "__main__":
     
-    input_dir = '/media/tarislada/SAMSUNG/Doric임시/854_0304/representative/Cricket_extraction/csv'
-    txt_dir = '/media/tarislada/SAMSUNG/Doric임시/854_0304/representative/postprocessing/interval_txt'
-    output_dir = '/media/tarislada/SAMSUNG/Doric임시/854_0304/representative/postprocessing/cricket_process_test'
+    # input_dir = '/media/tarislada/SAMSUNG/Doric임시/854_0304/representative/Cricket_extraction/csv'
+    # txt_dir = '/media/tarislada/SAMSUNG/Doric임시/854_0304/representative/postprocessing/interval_txt'
+    # output_dir = '/media/tarislada/SAMSUNG/Doric임시/854_0304/representative/postprocessing/cricket_process_test'
     
-    # input_dir = "SKH FP/cricket_dection5"    
-    # txt_dir = "SKH FP/interval_txt"
-    # output_dir = "SKH FP/FInalized_process/cricket_process_test5"
+    input_dir = "SKH FP/cricket_dection5"    
+    txt_dir = "SKH FP/interval_txt"
+    output_dir = "SKH FP/FInalized_process/cricket_process_test5"
     params = ValidationParams(downsample_60fps=True,speed_weight=0.0,accel_weight=0.0,jerk_weight=0.0)
     
     process_directory(input_dir, txt_dir, output_dir, params)

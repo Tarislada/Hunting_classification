@@ -12,6 +12,7 @@ import matplotlib.patches as patches
 class VisualizationConfig:
     """Configuration parameters for trace visualization."""
     # Frame selection
+    trace_start: Optional[int] = None  # <-- ADD THIS: Start frame for the trace
     target_frame: Optional[int] = None  # None means use last frame
     
     # Skeleton configuration
@@ -80,8 +81,12 @@ class TraceVisualizer:
         
     def filter_data_to_frame(self):
         """Filter data up to target frame."""
+        
+        start_frame = self.config.trace_start if self.config.trace_start is not None else 0
+        
         self.pose_filtered = self.pose_data[
-            self.pose_data['frame'] <= self.target_frame
+            (self.pose_data['frame'] >= start_frame) &
+            (self.pose_data['frame'] <= self.target_frame)
         ].copy()
 
         if self.pose_filtered['nose x'].max() < 1.1 and self.pose_filtered['nose y'].max()<1.1:
@@ -90,9 +95,14 @@ class TraceVisualizer:
             self.pose_normalized = False
         
         self.cricket_filtered = self.cricket_data[
-            self.cricket_data['frame'] <= self.target_frame
+            (self.cricket_data['frame'] >= start_frame) &
+            (self.cricket_data['frame'] <= self.target_frame)
         ].copy()
-        
+
+        if self.cricket_filtered.empty:
+            print("Warning: No cricket data in the specified frame range.")
+            return
+
         # Remove invalid cricket positions
         valid_cricket = ~(
             self.cricket_filtered[['smoothed_x', 'smoothed_y']].isna().any(axis=1)
@@ -403,9 +413,9 @@ def create_trace_visualization(video_path: str,
 # Example usage
 if __name__ == "__main__":
     # Example file paths - adjust these to your actual file paths
-    video_path = "SKH FP/video_file/m17_t1.mp4"
-    pose_csv_path = "SKH FP/kalman_filtered_w59p7/kalman_filtered_processed_filtered_m17_t1.csv"
-    cricket_csv_path = "SKH FP/FInalized_process/cricket_process_test5/crprocessed_m17_t1.csv"
+    video_path = "/home/tarislada/Documents/Extra_python_projects/SKH FP/video_file/m14_t2.mp4"
+    pose_csv_path = "/home/tarislada/Documents/Extra_python_projects/SKH FP/kalman_filtered_w59p7/kalman_filtered_processed_filtered_m14_t2.csv"
+    cricket_csv_path = "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/cricket_process_test5/crprocessed_m14_t2.csv"
     output_path = "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/traces.png"
     
     # Example 1: Default configuration (simple skeleton, last frame)
@@ -413,7 +423,8 @@ if __name__ == "__main__":
     
     # Example 2: Custom configuration
     custom_config = VisualizationConfig(
-        target_frame=4800,  # Specific frame instead of last
+        trace_start=2613,  # <-- EXAMPLE: Start the trace from frame 2500
+        target_frame=2950,  # Specific frame instead of last
         full_skeleton=True,  # Show full skeleton
         # cricket_trace_color=(255, 165, 0),  # Orange cricket trace
         cricket_trace_color=(0,0,0),
@@ -423,6 +434,6 @@ if __name__ == "__main__":
         output_dpi=300  # High resolution output
     )
     
-    output_path_custom = "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/trace_vis_custom.png"
+    output_path_custom = "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/trace_vis_custom1.png"
     create_trace_visualization(video_path, pose_csv_path, cricket_csv_path, 
                              output_path_custom, custom_config)

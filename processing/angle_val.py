@@ -286,8 +286,8 @@ class VisualFieldVisualizer:
                           zone: str) -> None:
         """Add metrics display to frame."""
         metrics = [
-            f"Head Angle: {head_angle:.1f}°",
-            f"Cricket Angle: {cricket_angle:.1f}°",
+            f"Head Angle: {head_angle:.1f}",
+            f"Cricket Angle: {cricket_angle:.1f}",
             f"Distance: {distance:.1f}px",
             f"Zone: {zone}"
         ]
@@ -653,12 +653,12 @@ if __name__ == "__main__":
     )
     
     # Run batch processing
-    process_directory(VIDEO_DIR, POSE_DIR, BBOX_DIR, OUTPUT_DIR, config)
+    # process_directory(VIDEO_DIR, POSE_DIR, BBOX_DIR, OUTPUT_DIR, config)
 
     # For single video testing:
-    # validator = VisualFieldVisualizer(config)
-    # video_path = 'SKH FP/video_file/m17_t1.mp4'
-    # pose_path = 'SKH FP/kalman_filtered_w59p7/kalman_filtered_processed_filtered_m17_t1.csv'
-    # bbox_path = 'SKH FP/FInalized_process/cricket_process_test5/crprocessed_m17_t1.csv'
-    # output_path = 'SKH FP/FInalized_process/m17_t1_debugging.mp4'
-    # process_video(video_path, pose_path, bbox_path, output_path, config=config)
+    validator = VisualFieldVisualizer(config)
+    video_path = '/home/tarislada/Documents/Extra_python_projects/SKH FP/video_file/m18_t7.mp4'
+    pose_path = '/home/tarislada/Documents/Extra_python_projects/SKH FP/kalman_filtered_w59p7/kalman_filtered_processed_filtered_m18_t7.csv'
+    bbox_path = '/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/cricket_process_test4/crprocessed_m18_t7.csv'
+    output_path = '/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/test_val_vid5/m18_t7_validated.mp4'
+    process_video(video_path, pose_path, bbox_path, output_path, config=config)
