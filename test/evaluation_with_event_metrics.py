@@ -1,238 +1,474 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import GroupKFold, RandomizedSearchCV, LeaveOneGroupOut
+from sklearn.model_selection import GroupKFold, RandomizedSearchCV
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from xgboost import XGBClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
 from imblearn.over_sampling import SMOTE
+from imblearn.combine import SMOTETomek
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from typing import Dict, List, Tuple
 from collections import defaultdict
+import re
 
-class EventMetrics:
-    """Calculate event-level metrics for action segmentation."""
+class EnhancedFeatureEngineer:
+    """
+    Comprehensive feature engineering for attack vs consume discrimination.
+    Focuses on motion dynamics, prey-relative features, and temporal patterns.
+    """
     
-    @staticmethod
-    def extract_events(predictions: np.ndarray, behavior_id: int) -> List[Tuple[int, int]]:
-        """Extract continuous events of a specific behavior."""
-        events = []
-        in_event = False
-        start = None
-        
-        for i, pred in enumerate(predictions):
-            if pred == behavior_id and not in_event:
-                in_event = True
-                start = i
-            elif pred != behavior_id and in_event:
-                in_event = False
-                events.append((start, i - 1))
-        
-        if in_event:
-            events.append((start, len(predictions) - 1))
-            
-        return events
+    def __init__(self):
+        self.feature_names = []
     
-    @staticmethod
-    def calculate_iou(event1: Tuple[int, int], event2: Tuple[int, int]) -> float:
-        """Calculate IoU between two temporal events."""
-        intersection_start = max(event1[0], event2[0])
-        intersection_end = min(event1[1], event2[1])
+    def parse_coordinates(self, df):
+        """Parse coordinate strings into x,y columns."""
+        coord_features = ['tail_base', 'body_center', 'nose']
         
-        if intersection_start <= intersection_end:
-            intersection = intersection_end - intersection_start + 1
-        else:
-            intersection = 0
-            
-        union = (event1[1] - event1[0] + 1) + (event2[1] - event2[0] + 1) - intersection
+        for coord_col in coord_features:
+            if coord_col in df.columns and df[coord_col].dtype == 'object':
+                try:
+                    df[f'{coord_col}_x'] = df[coord_col].str.extract(r'\(([-\d.]+),').astype('float32')
+                    df[f'{coord_col}_y'] = df[coord_col].str.extract(r',\s*([-\d.]+)\)').astype('float32')
+                    print(f"  Parsed {coord_col} coordinates")
+                except:
+                    print(f"  Warning: Could not parse {coord_col}")
         
-        return intersection / union if union > 0 else 0
+        return df
     
-    @staticmethod
-    def calculate_event_metrics(y_true: np.ndarray, y_pred: np.ndarray, 
-                               behavior_id: int, 
-                               iou_thresholds: List[float] = [0.1, 0.25, 0.5, 0.75]) -> Dict:
+    def add_basic_derivatives(self, df):
+        """Add velocity and acceleration features."""
+        print("  Adding velocity and acceleration features...")
+        
+        # 1st derivatives (velocity)
+        velocity_cols = ['head_angle', 'cricket_angle', 'distance', 'cricket_speed']
+        for col in velocity_cols:
+            if col in df.columns:
+                df[f'{col}_velocity'] = df[col].diff().astype('float32')
+        
+        # Relative angle (very important for behavior)
+        if 'cricket_angle' in df.columns and 'head_angle' in df.columns:
+            df['relative_angle'] = (df['cricket_angle'] - df['head_angle']).astype('float32')
+            df['relative_angle_velocity'] = df['relative_angle'].diff().astype('float32')
+        
+        # 2nd derivatives (acceleration)
+        acceleration_base = ['head_angle_velocity', 'distance_velocity', 'relative_angle_velocity']
+        for col in acceleration_base:
+            if col in df.columns:
+                new_col = col.replace('_velocity', '_acceleration')
+                df[new_col] = df[col].diff().astype('float32')
+        
+        return df
+    
+    def add_jerk_features(self, df):
         """
-        Calculate precision, recall, F1, and mAP for event detection.
+        Add 3rd derivative (jerk) features - CRITICAL for attack detection.
+        Attack has extreme jerk during strike, consume has low jerk.
         """
-        true_events = EventMetrics.extract_events(y_true, behavior_id)
-        pred_events = EventMetrics.extract_events(y_pred, behavior_id)
+        print("  Adding jerk features (3rd derivatives)...")
         
-        if len(true_events) == 0:
-            return {
-                'mAP': 0.0,
-                'avg_f1': 0.0,
-                'n_true_events': 0,
-                'n_pred_events': len(pred_events),
-                'n_true_frames': 0,
-                'details': {}
-            }
+        jerk_base = ['head_angle_acceleration', 'distance_acceleration', 'relative_angle_acceleration']
         
-        # Count total frames for this behavior
-        n_true_frames = np.sum(y_true == behavior_id)
-        
-        metrics_by_threshold = {}
-        f1_scores = []
-        
-        for iou_thresh in iou_thresholds:
-            true_positives = 0
-            matched_true = set()
-            
-            for pred_event in pred_events:
-                best_iou = 0
-                best_match = None
+        for col in jerk_base:
+            if col in df.columns:
+                # Basic jerk
+                jerk_col = col.replace('_acceleration', '_jerk')
+                df[jerk_col] = df[col].diff().astype('float32')
                 
-                for i, true_event in enumerate(true_events):
-                    if i not in matched_true:
-                        iou = EventMetrics.calculate_iou(pred_event, true_event)
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_match = i
+                # Jerk magnitude (absolute value)
+                df[f'{jerk_col}_magnitude'] = np.abs(df[jerk_col]).astype('float32')
                 
-                if best_iou >= iou_thresh and best_match is not None:
-                    true_positives += 1
-                    matched_true.add(best_match)
-            
-            precision = true_positives / len(pred_events) if len(pred_events) > 0 else 0
-            recall = true_positives / len(true_events)
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-            
-            metrics_by_threshold[f'IoU_{iou_thresh:.2f}'] = {
-                'precision': precision,
-                'recall': recall,
-                'f1': f1,
-                'tp': true_positives,
-                'fp': len(pred_events) - true_positives,
-                'fn': len(true_events) - true_positives
-            }
-            f1_scores.append(f1)
+                # Rolling max jerk (captures peak strike moment)
+                df[f'{jerk_col}_max_3'] = df[f'{jerk_col}_magnitude'].rolling(3, min_periods=1).max().astype('float32')
+                df[f'{jerk_col}_max_5'] = df[f'{jerk_col}_magnitude'].rolling(5, min_periods=1).max().astype('float32')
         
-        return {
-            'mAP': np.mean(f1_scores),
-            'avg_f1': np.mean(f1_scores),
-            'n_true_events': len(true_events),
-            'n_pred_events': len(pred_events),
-            'n_true_frames': int(n_true_frames),
-            'details': metrics_by_threshold
-        }
+        return df
+    
+    def add_spike_detection(self, df):
+        """
+        Add spike detection features - binary flags for extreme motion.
+        Helps model identify attack moments vs sustained consume behavior.
+        """
+        print("  Adding spike detection features...")
+        
+        spike_cols = [
+            ('distance_velocity', 'velocity'),
+            ('distance_acceleration', 'acceleration'),
+            ('head_angle_velocity', 'angular_velocity'),
+            ('head_angle_acceleration', 'angular_acceleration')
+        ]
+        
+        for col, label in spike_cols:
+            if col in df.columns:
+                # Define spike as value > mean + 2*std in rolling window
+                rolling_mean = df[col].rolling(10, min_periods=1).mean()
+                rolling_std = df[col].rolling(10, min_periods=1).std()
+                
+                spike_col = f'{label}_spike'
+                df[spike_col] = (df[col] > (rolling_mean + 2 * rolling_std)).astype('int8')
+        
+        # Combined spike (both velocity and acceleration spike together)
+        if 'velocity_spike' in df.columns and 'acceleration_spike' in df.columns:
+            df['combined_motion_spike'] = (df['velocity_spike'] * df['acceleration_spike']).astype('int8')
+        
+        # Count spikes in window (attack = 1 spike, consume = multiple rhythmic spikes)
+        if 'velocity_spike' in df.columns:
+            df['spike_count_10'] = df['velocity_spike'].rolling(10, min_periods=1).sum().astype('float32')
+        
+        return df
+    
+    def add_peak_analysis(self, df):
+        """
+        Detect and count peaks in motion. 
+        Consume has rhythmic peaks (chewing), attack has single dominant peak.
+        """
+        print("  Adding peak analysis features...")
+        
+        peak_cols = ['distance_velocity', 'distance_acceleration']
+        
+        for col in peak_cols:
+            if col in df.columns:
+                # Local maximum detection
+                is_peak = (df[col] > df[col].shift(1)) & (df[col] > df[col].shift(-1))
+                peak_col = f'{col}_is_peak'
+                df[peak_col] = is_peak.astype('int8')
+                
+                # Count peaks in window
+                df[f'{col}_peaks_10'] = df[peak_col].rolling(10, min_periods=1).sum().astype('float32')
+        
+        return df
+    
+    def add_prey_relative_features(self, df):
+        """
+        Add prey-relative features - MOST DISCRIMINATIVE for attack vs consume.
+        Attack: rapid approach, high alignment, short duration
+        Consume: stable at prey, less alignment critical, long duration
+        """
+        print("  Adding prey-relative features...")
+        
+        # We have distance and cricket_angle already, which gives us relative position
+        
+        if 'distance' in df.columns:
+            # Rate of distance change (approach speed)
+            if 'distance_velocity' not in df.columns:
+                df['distance_velocity'] = df['distance'].diff().astype('float32')
+            
+            # Binary: actively approaching prey (distance decreasing rapidly)
+            df['approaching_prey'] = (df['distance_velocity'] < -1.0).astype('int8')
+            
+            # Binary: at prey location (very close distance)
+            distance_threshold = df['distance'].quantile(0.1)  # Bottom 10% of distances
+            df['at_prey_location'] = (df['distance'] < distance_threshold).astype('int8')
+            
+            # Time spent at prey location (cumulative in window)
+            df['time_at_prey_10'] = df['at_prey_location'].rolling(10, min_periods=1).sum().astype('float32')
+            df['time_at_prey_20'] = df['at_prey_location'].rolling(20, min_periods=1).sum().astype('float32')
+            
+            # Rapid approach detection (extreme approach speed)
+            distance_vel_std = df['distance_velocity'].rolling(20, min_periods=1).std()
+            df['rapid_approach'] = (df['distance_velocity'] < -2 * distance_vel_std).astype('int8')
+        
+        # Head-prey alignment (how aligned is head angle with cricket angle)
+        if 'head_angle' in df.columns and 'cricket_angle' in df.columns:
+            if 'relative_angle' not in df.columns:
+                df['relative_angle'] = (df['cricket_angle'] - df['head_angle']).astype('float32')
+            
+            # Alignment quality (lower absolute relative angle = better aligned)
+            df['prey_alignment'] = np.abs(df['relative_angle']).astype('float32')
+            df['well_aligned'] = (df['prey_alignment'] < 15).astype('int8')  # Within 15 degrees
+        
+        return df
+    
+    def add_stability_features(self, df):
+        """
+        Measure behavior stability/consistency.
+        Consume is stable/stationary, attack is unstable/directed motion.
+        """
+        print("  Adding stability features...")
+        
+        # Direction stability (how consistent is heading)
+        if 'head_angle' in df.columns:
+            df['direction_stability'] = df['head_angle'].rolling(10, min_periods=1).std().astype('float32')
+        
+        # Position stability (how much movement)
+        if 'nose_x' in df.columns and 'nose_y' in df.columns:
+            nose_displacement = np.sqrt(df['nose_x'].diff()**2 + df['nose_y'].diff()**2)
+            df['position_stability'] = nose_displacement.rolling(10, min_periods=1).std().astype('float32')
+        
+        # Direction changes (jerky behavior indicator)
+        if 'relative_angle' in df.columns:
+            sign_changes = (np.sign(df['relative_angle'].diff()).diff() != 0)
+            df['direction_changes_10'] = sign_changes.rolling(10, min_periods=1).sum().astype('float32')
+        
+        return df
+    
+    def add_change_point_features(self, df):
+        """
+        Detect change points over different time scales.
+        Helps identify behavior transitions.
+        """
+        print("  Adding change-point detection features...")
+        
+        change_cols = ['distance', 'head_angle', 'relative_angle']
+        windows = [3, 5, 10]
+        
+        for col in change_cols:
+            if col in df.columns:
+                for window in windows:
+                    change_col = f'{col}_change_{window}'
+                    df[change_col] = (df[col] - df[col].shift(window)).astype('float32')
+        
+        return df
+    
+    def add_rolling_statistics(self, df):
+        """
+        Add essential rolling statistics for temporal context.
+        Reduced set focusing on most important features.
+        """
+        print("  Adding rolling statistics...")
+        
+        priority_features = ['head_angle', 'cricket_angle', 'distance', 'relative_angle']
+        windows = [10, 20]
+        stats = ['mean', 'std']
+        
+        for col in priority_features:
+            if col in df.columns:
+                for window in windows:
+                    for stat in stats:
+                        stat_col = f'{col}_{stat}_{window}'
+                        if stat == 'mean':
+                            df[stat_col] = df[col].rolling(window, min_periods=1).mean().astype('float32')
+                        elif stat == 'std':
+                            df[stat_col] = df[col].rolling(window, min_periods=1).std().astype('float32')
+        
+        return df
+    
+    def add_behavioral_indicators(self, df):
+        """Add binary behavioral state indicators."""
+        print("  Adding behavioral indicators...")
+        
+        # Cricket visibility
+        if 'cricket_use_nose_position' in df.columns:
+            df['is_cricket_visible'] = (~df['cricket_use_nose_position']).astype('int8')
+        
+        # Binocular zone (important for attack targeting)
+        if 'zone' in df.columns:
+            df['cricket_in_binocular'] = (df['zone'] == 'binocular').astype('int8')
+        
+        return df
+    
+    def engineer_features(self, df):
+        """Main feature engineering pipeline."""
+        print("\nEngineering features...")
+        
+        df = df.copy()
+        
+        # Step 1: Parse coordinates
+        df = self.parse_coordinates(df)
+        
+        # Step 2: Basic derivatives
+        df = self.add_basic_derivatives(df)
+        
+        # Step 3: HIGH PRIORITY - Jerk features
+        df = self.add_jerk_features(df)
+        
+        # Step 4: HIGH PRIORITY - Spike detection
+        df = self.add_spike_detection(df)
+        
+        # Step 5: Peak analysis
+        df = self.add_peak_analysis(df)
+        
+        # Step 6: HIGH PRIORITY - Prey-relative features
+        df = self.add_prey_relative_features(df)
+        
+        # Step 7: Stability features
+        df = self.add_stability_features(df)
+        
+        # Step 8: Change-point detection
+        df = self.add_change_point_features(df)
+        
+        # Step 9: Rolling statistics
+        df = self.add_rolling_statistics(df)
+        
+        # Step 10: Behavioral indicators
+        df = self.add_behavioral_indicators(df)
+        
+        print("Feature engineering complete!")
+        
+        return df
+def plot_prediction_bands(y_true, y_pred, encoder, title, save_dir):
+    """
+    Generates a band-style plot comparing true and predicted labels for a trial.
+    """
+    import matplotlib.patches as mpatches
 
-def evaluate_with_event_metrics(y_true, y_pred, target_encoder, groups=None):
-    """
-    Comprehensive evaluation with both frame-level and event-level metrics.
-    """
-    class_names = target_encoder.classes_
-    
-    # Frame-level metrics
-    print("\n" + "="*60)
-    print("FRAME-LEVEL METRICS")
-    print("="*60)
-    
-    frame_report = classification_report(y_true, y_pred, 
-                                        target_names=class_names,
-                                        output_dict=True,
-                                        zero_division=0)
-    
-    print(classification_report(y_true, y_pred, 
-                               target_names=class_names,
-                               zero_division=0))
-    
-    # Event-level metrics
-    print("\n" + "="*60)
-    print("EVENT-LEVEL METRICS")
-    print("="*60)
-    
-    event_results = {}
-    for behavior in class_names:
-        if behavior != 'background':  # Skip background for event metrics
-            behavior_id = target_encoder.transform([behavior])[0]
-            event_metrics = EventMetrics.calculate_event_metrics(
-                y_true, y_pred, behavior_id
-            )
-            event_results[behavior] = event_metrics
-            
-            print(f"\n{behavior.upper()}:")
-            print(f"  True events: {event_metrics['n_true_events']}")
-            print(f"  Predicted events: {event_metrics['n_pred_events']}")
-            print(f"  Total frames: {event_metrics['n_true_frames']}")
-            print(f"  Event mAP: {event_metrics['mAP']:.3f}")
-            
-            # Show performance at different IoU thresholds
-            print(f"  Performance by IoU threshold:")
-            for thresh_name, metrics in event_metrics['details'].items():
-                iou_val = thresh_name.split('_')[1]
-                print(f"    IoU≥{iou_val}: P={metrics['precision']:.2f}, "
-                      f"R={metrics['recall']:.2f}, F1={metrics['f1']:.2f}")
-    
-    # Combined summary
-    print("\n" + "="*60)
-    print("SUMMARY COMPARISON")
-    print("="*60)
-    
-    print(f"\n{'Behavior':<20} {'Frame F1':>10} {'Event mAP':>10} {'Improvement':>12}")
-    print("-" * 52)
-    
-    for behavior in class_names:
-        if behavior != 'background':
-            frame_f1 = frame_report[behavior]['f1-score']
-            event_map = event_results[behavior]['mAP']
-            improvement = event_map - frame_f1
-            
-            print(f"{behavior:<20} {frame_f1:>10.3f} {event_map:>10.3f} "
-                  f"{'+' if improvement > 0 else ''}{improvement:>11.3f}")
-    
-    # Overall scores
-    frame_macro_f1 = frame_report['macro avg']['f1-score']
-    event_macro_map = np.mean([r['mAP'] for r in event_results.values()])
-    
-    print("-" * 52)
-    print(f"{'Macro Average':<20} {frame_macro_f1:>10.3f} {event_macro_map:>10.3f} "
-          f"{'+' if event_macro_map > frame_macro_f1 else ''}"
-          f"{event_macro_map - frame_macro_f1:>11.3f}")
-    
-    return {
-        'frame_metrics': frame_report,
-        'event_metrics': event_results,
-        'summary': {
-            'frame_macro_f1': frame_macro_f1,
-            'event_macro_map': event_macro_map,
-            'improvement': event_macro_map - frame_macro_f1
-        }
+    # Define a consistent color map for your new labels
+    color_map = {
+        'attack': '#66c2a5',      # Teal
+        'background': '#8da0cb',  # Blue
+        'chasing': '#e78ac3',      # Pink/Purple
+        'consume': '#ffd92f'      # Yellow
     }
+    
+    # Get integer labels for the colors
+    int_to_color = {encoder.transform([name])[0]: color for name, color in color_map.items() if name in encoder.classes_}
+    
+    # Create a 2xN array representing the two bands
+    num_frames = len(y_true)
+    bands = np.zeros((2, num_frames))
+    bands[0, :] = y_true  # Predicted
+    bands[1, :] = y_pred  # True
+    
+    # Create a colormap from our dictionary
+    cmap_colors = [int_to_color.get(i, '#ffffff') for i in range(len(encoder.classes_))]
+    cmap = plt.cm.colors.ListedColormap(cmap_colors)
+    
+    fig, ax = plt.subplots(figsize=(15, 2.5))
+    
+    # Display the bands
+    ax.imshow(bands, cmap=cmap, aspect='auto', interpolation='nearest')
+    
+    # Configure plot aesthetics
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(['True', 'Predicted'])
+    ax.set_xlabel('Frame Number')
+    ax.set_title(title)
+    
+    # Create a custom legend
+    legend_patches = [mpatches.Patch(color=color, label=name) for name, color in color_map.items() if name in encoder.classes_]
+    ax.legend(handles=legend_patches, bbox_to_anchor=(1.01, 1), loc='upper left')
+    
+    # Ensure the save directory exists
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"{title.replace(' ', '_')}.png"
+    
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close(fig) # Close the figure to save memory
+    print(f"Saved prediction band plot to {save_path}")
+    
+def plot_classification_metrics_bar(behavior_summaries: Dict, experiment_name: str, save_dir: Path) -> None:
+    """
+    Create a grouped bar chart showing precision, recall, and F1-score for each behavior class.
+    
+    Args:
+        behavior_summaries: Dictionary containing per-behavior metrics from CV
+        experiment_name: Name of the experiment for the title
+        save_dir: Directory to save the plot
+    """
+    print("\nGenerating classification metrics bar chart...")
+    
+    # Filter to only the behaviors we care about
+    behaviors_of_interest = ['chasing', 'attack', 'consume']
+    
+    # Prepare data for plotting
+    behaviors = []
+    precision_means = []
+    precision_stds = []
+    recall_means = []
+    recall_stds = []
+    f1_means = []
+    f1_stds = []
+    
+    for behavior in behaviors_of_interest:
+        if behavior in behavior_summaries:
+            behaviors.append(behavior.capitalize())
+            precision_means.append(behavior_summaries[behavior]['precision_mean'])
+            precision_stds.append(behavior_summaries[behavior]['precision_std'])
+            recall_means.append(behavior_summaries[behavior]['recall_mean'])
+            recall_stds.append(behavior_summaries[behavior]['recall_std'])
+            f1_means.append(behavior_summaries[behavior]['f1_mean'])
+            f1_stds.append(behavior_summaries[behavior]['f1_std'])
+    
+    if not behaviors:
+        print("Warning: No behaviors found for plotting.")
+        return
+    
+    # Set up the plot
+    x = np.arange(len(behaviors))
+    width = 0.25  # Width of each bar
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Create the grouped bars
+    bars1 = ax.bar(x - width, precision_means, width, yerr=precision_stds, 
+                   label='Precision', capsize=5, color='#66c2a5', alpha=0.8)
+    bars2 = ax.bar(x, recall_means, width, yerr=recall_stds,
+                   label='Recall', capsize=5, color='#fc8d62', alpha=0.8)
+    bars3 = ax.bar(x + width, f1_means, width, yerr=f1_stds,
+                   label='F1-Score', capsize=5, color='#8da0cb', alpha=0.8)
+    
+    # Customize the plot
+    ax.set_xlabel('Behavior Class', fontsize=14, weight='bold')
+    ax.set_ylabel('Score', fontsize=14, weight='bold')
+    ax.set_title(f'Classification Performance by Behavior\n{experiment_name}', 
+                 fontsize=16, weight='bold', pad=20)
+    ax.set_xticks(x)
+    ax.set_xticklabels(behaviors, fontsize=12)
+    ax.set_ylim(0, 1.0)
+    ax.legend(fontsize=11, loc='lower right')
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # Add value labels on top of bars
+    def add_value_labels(bars, values, stds):
+        for bar, val, std in zip(bars, values, stds):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + std + 0.02,
+                   f'{val:.2f}',
+                   ha='center', va='bottom', fontsize=9)
+    
+    add_value_labels(bars1, precision_means, precision_stds)
+    add_value_labels(bars2, recall_means, recall_stds)
+    add_value_labels(bars3, f1_means, f1_stds)
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"classification_metrics_{experiment_name.replace(' ', '_')}.png"
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    
+    print(f"Saved classification metrics bar chart to: {save_path}")
 
 def run_experiment(feature_files: List[str], label_files: List[str], 
                   experiment_name: str = "Experiment",
                   use_smote: bool = True,
-                  hyperparam_search: bool = True):
+                  hyperparam_search: bool = True,
+                  use_thresholding: bool = False):
     """
-    Run experiment with proper CV evaluation, SMOTE, and hyperparameter search.
-    Reports ONLY cross-validation metrics, not in-sample.
+    Run experiment with comprehensive feature engineering.
+    SIMPLIFIED: Frame-level metrics only, no event metrics.
     """
-    from sklearn.model_selection import RandomizedSearchCV
-    from imblearn.over_sampling import SMOTE
-    from collections import defaultdict
     import re
     
     print(f"\n{'='*60}")
     print(f"{experiment_name}")
     print('='*60)
     
+    # Initialize feature engineer
+    feature_engineer = EnhancedFeatureEngineer()
+    
     # Load and combine all data
     all_data = []
     for feat_file, label_file in zip(feature_files, label_files):
         try:
+            base_name = Path(feat_file).stem.replace('_enhanced_features', '')
             match = re.search(r'(m\d+)', Path(feat_file).stem)
             if not match:
                 print(f"Warning: Could not find animal ID in {Path(feat_file).stem}. Skipping file.")
                 continue
             animal_id = match.group(1)
+            trial_id = base_name # e.g., 'm14_t1'
 
             features = pd.read_csv(feat_file)
             labels = pd.read_csv(label_file)
             
             merged = pd.merge(features, labels, on='frame', how='inner')
             merged['animal_id'] = animal_id
+            merged['trial_id'] = trial_id # <-- ADD TRIAL ID
             all_data.append(merged)
             
             print(f"Loaded {animal_id}: {len(merged)} frames")
@@ -250,12 +486,16 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     
     # Print class distribution
     print("\nClass distribution:")
-    for behavior, count in data['behavior'].value_counts().items():
+    behavior_counts = data['behavior'].value_counts()
+    for behavior, count in behavior_counts.items():
         print(f"  {behavior}: {count} ({count/len(data)*100:.1f}%)")
     
+    # Engineer features
+    data = feature_engineer.engineer_features(data)
+    
     # Prepare features and labels
-    exclude_cols = ['frame', 'behavior', 'animal_id', 'cricket_status', 'validation', 
-                   'zone', 'tail_base', 'body_center', 'nose']
+    exclude_cols = ['frame', 'behavior', 'animal_id', 'trial_id', 'cricket_status', 'validation', 
+                   'zone', 'tail_base', 'body_center', 'nose', 'cricket_use_nose_position']
     feature_cols = [col for col in data.columns if col not in exclude_cols and not col.startswith('Unnamed')]
     
     # Handle missing values
@@ -270,31 +510,25 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     
     print(f"\nFeatures shape: {X.shape}")
     print(f"Using {len(feature_cols)} features")
+    print(f"Encoded behaviors: {dict(zip(target_encoder.classes_, range(len(target_encoder.classes_))))}")
     print(f"SMOTE: {'Enabled' if use_smote else 'Disabled'}")
     print(f"Hyperparameter search: {'Enabled' if hyperparam_search else 'Disabled'}")
     
     # Cross-validation setup
-    n_animals = len(np.unique(groups))
-    print(f"\nFound {n_animals} unique animals. Using LeaveOneGroupOut for cross-validation.")
     cv = GroupKFold(n_splits=4)
-    # cv = LeaveOneGroupOut()
     cv_splits = list(cv.split(X, y, groups))
     
     # Storage for CV results
     frame_scores = []
-    event_scores_by_behavior = defaultdict(list)
-    all_event_maps = []
     detailed_fold_results = []
     all_y_test_agg = []
     all_y_pred_agg = []
-    
+
     print(f"\nRunning 4-fold cross-validation...")
-    # print(f"\nRunning {len(cv_splits)}-fold Leave-One-Group-Out cross-validation...")
-    
+
     for fold, (train_idx, test_idx) in enumerate(cv_splits):
         print(f"\n{'='*40}")
         print(f"Fold {fold + 1}/4")
-        # print(f"Fold {fold + 1}/{n_animals}")
         print('='*40)
         
         X_train, X_test = X[train_idx], X[test_idx]
@@ -310,81 +544,65 @@ def run_experiment(feature_files: List[str], label_files: List[str],
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # Apply SMOTE if requested (only on training data!)
+        # Apply SMOTE if requested
         if use_smote:
             print(f"Applying SMOTE to training data...")
-            # 1. Get current sample counts
             original_counts = pd.Series(y_train).value_counts().to_dict()
             print(f"Original counts: {original_counts}")
             
-            # --- MODIFIED: Update SMOTE strategy for new labels ---
-            # 2. Define your target counts for the new classes
-            # Get the integer labels for your classes
+            # Define SMOTE strategy
             sampling_strategy = {}
+            behavior_to_id = {behavior: target_encoder.transform([behavior])[0] 
+                            for behavior in target_encoder.classes_}
             
-            # Safely get labels, only if they exist in the data
-            if 'attack' in target_encoder.classes_:
-                attack_label = target_encoder.transform(['attack'])[0]
-                sampling_strategy[attack_label] = int(original_counts.get(attack_label, 0) * 1.0) # Increase attack
-            
-            if 'chasing' in target_encoder.classes_:
-                chasing_label = target_encoder.transform(['chasing'])[0]
-                sampling_strategy[chasing_label] = int(original_counts.get(chasing_label, 0) * 1.05) # Increase chasing
-            
-            if 'consume' in target_encoder.classes_:
-                consume_label = target_encoder.transform(['consume'])[0]
-                sampling_strategy[consume_label] = int(original_counts.get(consume_label, 0) * 1.15) # Increase consume
-            
-            # SMOTE will keep other classes (like background) as they are.
+            for behavior, behavior_id in behavior_to_id.items():
+                if behavior_id in original_counts:
+                    original_count = original_counts[behavior_id]
+                    
+                    if behavior == 'attack':
+                        # Aggressive boost for attack
+                        sampling_strategy[behavior_id] = int(original_count * 1.1)
+                    elif behavior == 'consume':
+                        # Moderate boost for consume
+                        sampling_strategy[behavior_id] = int(original_count * 1.05)
+                    elif behavior == 'chasing':
+                        # Slight boost for chasing
+                        sampling_strategy[behavior_id] = int(original_count * 1.05)
             
             print(f"SMOTE target strategy: {sampling_strategy}")
             
-            # 3. Apply SMOTE with the defined strategy
-            if sampling_strategy:
+            try:
                 smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
                 X_train_scaled, y_train = smote.fit_resample(X_train_scaled, y_train)
                 print(f"After SMOTE: {X_train_scaled.shape[0]} training samples")
                 print(f"New counts: {pd.Series(y_train).value_counts().to_dict()}")
-            else:
-                print("No target classes for SMOTE found in this fold. Skipping.")
+            except Exception as e:
+                print(f"SMOTE failed: {e}. Continuing without SMOTE for this fold.")
         
-        # Calculate sample weights for training
+        # Calculate sample weights
         classes = np.unique(y_train)
-        # Automatic weights (inverse ratio)
         class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
-        sample_weights = np.array([class_weights[label] for label in y_train])
-        # manual_weights = {
-        #     'background': 1.86,
-        #     'chasing': 5.69,
-        #     'attack': 7.5,
-        #     'consume': 4.565
-        # }
-
-        # class_weights_dict = {}
-        # for class_name, weight in manual_weights.items():
-        #     if class_name in target_encoder.classes_:
-        #         # Get the integer label for the class name
-        #         class_label = target_encoder.transform([class_name])[0]
-        #         class_weights_dict[class_label] = weight
         
-        # print(f"Using manual class weights: {class_weights_dict}")
-
-        # # 3. Create the final sample_weights array to pass to the model.
-        # #    This maps each sample in the training set to its corresponding weight.
-        # sample_weights = np.array([class_weights_dict.get(label, 1.0) for label in y_train])
-
+        # Extra weight for attack
+        # attack_id = target_encoder.transform(['attack'])[0]
+        class_weights_dict = dict(zip(classes, class_weights))
+        # if attack_id in class_weights_dict:
+        #     class_weights_dict[attack_id] *= 1.5  # Extra 50% weight for attack
+        
+        class_weights = np.array([class_weights_dict[label] for label in y_train])
+        
         # Model selection
         if hyperparam_search:
             print(f"Performing hyperparameter search...")
             param_distributions = {
-                    'n_estimators': [150, 200],
-                    'max_depth': [3, 4, 5],
-                    'learning_rate': [0.075, 0.1],
-                    'subsample': [0.8, 0.9, 0.95],       # Add subsampling
-                    'colsample_bytree': [0.4, 0.5, 0.6],# Add feature sampling
-                    'gamma': [0, 0.01, 0.1],             # Add gamma for pruning
-                    'reg_alpha': [0.01, 0.05, 0.1],        # Add L1 regularization
-                    'reg_lambda': [1.25, 1.5, 1.75]              # Add L2 regularization
+                'n_estimators': [150, 200],
+                'max_depth': [4, 5, 6],
+                'learning_rate': [0.075, 0.1],
+                'subsample': [0.8, 0.9],
+                'colsample_bytree': [0.5, 0.6, 0.7],
+                'gamma': [0, 0.1, 0.2],
+                'reg_alpha': [0.05, 0.1],
+                'reg_lambda': [1.5, 2.0]
             }
             
             base_model = XGBClassifier(
@@ -392,33 +610,106 @@ def run_experiment(feature_files: List[str], label_files: List[str],
                 eval_metric='mlogloss'
             )
             
-            # Note: We're doing nested CV here (search within the training fold)
             search = RandomizedSearchCV(
                 base_model,
                 param_distributions,
-                n_iter=10,  # Reduced for speed
-                cv=2,  # Simple 2-fold within training data
+                n_iter=15,
+                cv=2,
                 scoring='f1_macro',
                 random_state=42,
-                n_jobs=-1
+                n_jobs=4
             )
-            search.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+            search.fit(X_train_scaled, y_train, sample_weight=class_weights)
             model = search.best_estimator_
             print(f"Best params: {search.best_params_}")
         else:
-            # Use fixed hyperparameters
             model = XGBClassifier(
                 n_estimators=200,
-                max_depth=6,
+                max_depth=5,
                 learning_rate=0.1,
+                subsample=0.8,
+                colsample_bytree=0.6,
                 random_state=42,
                 eval_metric='mlogloss'
             )
-            model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+            model.fit(X_train_scaled, y_train, sample_weight=class_weights)
         
-        # Predict on test set
-        y_pred = model.predict(X_test_scaled)
-        # --- NEW: Store predictions for aggregated confusion matrix ---
+        if use_thresholding:
+            print("Predicting with custom threshold to balance precision/recall...")
+            # 1. Get class probabilities instead of direct predictions
+            y_pred_proba = model.predict_proba(X_test_scaled)
+            
+            # 2. Get the default prediction (the class with the highest probability)
+            y_pred = np.argmax(y_pred_proba, axis=1)
+            
+            # 3. Apply a custom threshold to increase precision for 'attack'
+            if 'attack' in target_encoder.classes_:
+                attack_label = target_encoder.transform(['attack'])[0]
+                
+                # THIS IS YOUR TUNABLE PARAMETER. Increase it to boost precision.
+                # ATTACK_THRESHOLD = 0.58
+                ATTACK_THRESHOLD = 0.595 
+                
+                # Find where the model initially predicted 'attack'
+                attack_predictions_mask = (y_pred == attack_label)
+                
+                # Find where the model was "not confident enough" in its attack prediction
+                low_confidence_mask = (y_pred_proba[:, attack_label] < ATTACK_THRESHOLD)
+                
+                # Identify frames to change: predicted 'attack' BUT with low confidence
+                change_mask = attack_predictions_mask & low_confidence_mask
+                
+                if np.any(change_mask):
+                    print(f"Reverting {np.sum(change_mask)} low-confidence 'attack' predictions...")
+                    # Get the probabilities for the frames to change
+                    probs_to_change = y_pred_proba[change_mask]
+                    # Temporarily set the probability of the 'attack' class to 0
+                    probs_to_change[:, attack_label] = 0
+                    # Find the new best class (which is now the original second choice)
+                    new_predictions = np.argmax(probs_to_change, axis=1)
+                    # Apply the changes back to the main prediction array
+                    y_pred[change_mask] = new_predictions
+        else:
+            # Standard prediction if thresholding is off
+            y_pred = model.predict(X_test_scaled)
+
+        test_trial_ids = data['trial_id'].iloc[test_idx].values
+        unique_test_trials = np.unique(test_trial_ids)
+        
+        print(f"\nGenerating prediction plots for {len(unique_test_trials)} trial(s)...")
+        for trial in unique_test_trials:
+            # Get the mask for the current trial
+            trial_mask = (test_trial_ids == trial)
+            
+            # Filter the true and predicted labels for this trial
+            y_true_trial = y_test[trial_mask]
+            y_pred_trial = y_pred[trial_mask]
+            
+            # Plot the bands for this specific trial
+            plot_title = f"Prediction_vs_True_for_{trial}"
+            save_directory = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/prediction_plots/prediction_plots") / experiment_name.replace(" ", "_")
+            plot_prediction_bands(y_true_trial, y_pred_trial, target_encoder, plot_title, save_directory)
+            trial_df = data.iloc[test_idx][data['trial_id'].iloc[test_idx] == trial]
+            frame_numbers = trial_df['frame'].values
+
+            # Convert predicted integer labels back to string labels
+            predicted_labels_str = target_encoder.inverse_transform(y_pred_trial)
+
+            # Create the analysis DataFrame in the format TimingValidator expects
+            analysis_df = pd.DataFrame({
+                'frame': frame_numbers,
+                'behavior': predicted_labels_str
+            })
+
+            # Define the output directory for these analysis files
+            analysis_save_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/prediction_plots/timing_analysis_files") / experiment_name.replace(" ", "_")
+            analysis_save_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save the file with the expected name format (e.g., "m14_t1_analysis.csv")
+            analysis_file_path = analysis_save_dir / f"{trial}_analysis.csv"
+            analysis_df.to_csv(analysis_file_path, index=False)
+            print(f"  Saved timing analysis file to: {analysis_file_path}")
+
         all_y_test_agg.append(y_test)
         all_y_pred_agg.append(y_pred)
         
@@ -426,21 +717,7 @@ def run_experiment(feature_files: List[str], label_files: List[str],
         frame_f1 = f1_score(y_test, y_pred, average='macro')
         frame_scores.append(frame_f1)
         
-        # Calculate event metrics for each behavior
-        fold_event_results = {}
-        for behavior in target_encoder.classes_:
-            if behavior != 'background':
-                behavior_id = target_encoder.transform([behavior])[0]
-                event_metrics = EventMetrics.calculate_event_metrics(
-                    y_test, y_pred, behavior_id
-                )
-                event_scores_by_behavior[behavior].append(event_metrics['mAP'])
-                fold_event_results[behavior] = event_metrics
-        
-        event_map = np.mean([r['mAP'] for r in fold_event_results.values()])
-        all_event_maps.append(event_map)
-        
-        # Per-behavior frame-level F1
+        # Per-behavior metrics
         frame_report = classification_report(y_test, y_pred, 
                                             target_names=target_encoder.classes_,
                                             output_dict=True,
@@ -448,207 +725,144 @@ def run_experiment(feature_files: List[str], label_files: List[str],
         
         # Print fold results
         print(f"\nFold {fold + 1} Results:")
-        # --- NEW: Print full classification report for the fold ---
-        print("\n--- Frame-Level Report ---")
         print(classification_report(y_test, y_pred, 
                                     target_names=target_encoder.classes_,
                                     zero_division=0))
-
-        print(f"  Overall Frame F1: {frame_f1:.3f}")
-        print(f"  Overall Event mAP: {event_map:.3f}")
-        print(f"\n  Per-behavior performance:")
-        for behavior in target_encoder.classes_:
-            if behavior != 'background':
-                behavior_frame_f1 = frame_report[behavior]['f1-score']
-                behavior_event_map = fold_event_results[behavior]['mAP']
-                print(f"    {behavior}:")
-                print(f"      Frame F1: {behavior_frame_f1:.3f}")
-                print(f"      Event mAP: {behavior_event_map:.3f}")
-                print(f"      Events: {fold_event_results[behavior]['n_true_events']} true, "
-                      f"{fold_event_results[behavior]['n_pred_events']} predicted")
+        print(f"  Macro F1: {frame_f1:.3f}")
         
         detailed_fold_results.append({
             'fold': fold + 1,
             'frame_f1': frame_f1,
-            'event_map': event_map,
-            'frame_report': frame_report,
-            'event_results': fold_event_results
+            'frame_report': frame_report
         })
     
-    # Calculate final CV metrics
+    # Final CV results
     print(f"\n{'='*60}")
-    print("FINAL CROSS-VALIDATION RESULTS (This is what you report!)")
+    print("FINAL CROSS-VALIDATION RESULTS")
     print('='*60)
-    print("\n" + "="*60)
-    print("AGGREGATED CONFUSION MATRIX (from all CV folds)")
-    print("="*60)
     
-    # Concatenate all test and prediction arrays from the folds
+    # Aggregated confusion matrix
     y_true_all_folds = np.concatenate(all_y_test_agg)
     y_pred_all_folds = np.concatenate(all_y_pred_agg)
     
-    # Generate the confusion matrix
     cm = confusion_matrix(y_true_all_folds, y_pred_all_folds, normalize='true')
     cm_df = pd.DataFrame(cm, index=target_encoder.classes_, columns=target_encoder.classes_)
     
     plt.figure(figsize=(10, 8))
     sns.heatmap(cm_df, annot=True, fmt='.2f', cmap='Blues')
-    plt.title('Aggregated Cross-Validation Confusion Matrix (Normalized by True Label)')
+    plt.title('Aggregated Cross-Validation Confusion Matrix')
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
+    plt.tight_layout()
     plt.show()
-    print("\n" + "="*60)
-    print("These are your reportable metrics - all from cross-validation!")
-
     
     # Overall metrics
     cv_frame_f1_mean = np.mean(frame_scores)
     cv_frame_f1_std = np.std(frame_scores)
-    cv_event_map_mean = np.mean(all_event_maps)
-    cv_event_map_std = np.std(all_event_maps)
     
     print(f"\nOverall Performance:")
     print(f"  Frame-level Macro F1: {cv_frame_f1_mean:.3f} ± {cv_frame_f1_std:.3f}")
-    print(f"  Event-level Macro mAP: {cv_event_map_mean:.3f} ± {cv_event_map_std:.3f}")
-    print(f"  Improvement: {((cv_event_map_mean - cv_frame_f1_mean) / cv_frame_f1_mean * 100):.1f}%")
     
     # Per-behavior CV metrics
     print(f"\nPer-Behavior CV Performance:")
-    print(f"{'Behavior':<20} {'Frame F1':>12} {'Event mAP':>12} {'Improvement':>12}")
+    print(f"{'Behavior':<20} {'Precision':>12} {'Recall':>12} {'F1-Score':>12}")
     print("-" * 56)
     
     behavior_summaries = {}
     for behavior in target_encoder.classes_:
-        if behavior != 'background':
-            # Get frame F1 for this behavior across folds
-            behavior_frame_f1s = [r['frame_report'][behavior]['f1-score'] 
-                                 for r in detailed_fold_results]
-            frame_mean = np.mean(behavior_frame_f1s)
-            frame_std = np.std(behavior_frame_f1s)
-            
-            # Get event mAP for this behavior across folds
-            event_mean = np.mean(event_scores_by_behavior[behavior])
-            event_std = np.std(event_scores_by_behavior[behavior])
-            
-            improvement = ((event_mean - frame_mean) / frame_mean * 100) if frame_mean > 0 else 0
-            
-            print(f"{behavior:<20} {frame_mean:.3f}±{frame_std:.3f}  "
-                  f"{event_mean:.3f}±{event_std:.3f}  {improvement:+.1f}%")
-            
-            behavior_summaries[behavior] = {
-                'frame_f1_mean': frame_mean,
-                'frame_f1_std': frame_std,
-                'event_map_mean': event_mean,
-                'event_map_std': event_std
-            }
+        # Get metrics for this behavior across folds
+        behavior_precisions = [r['frame_report'][behavior]['precision'] for r in detailed_fold_results]
+        behavior_recalls = [r['frame_report'][behavior]['recall'] for r in detailed_fold_results]
+        behavior_f1s = [r['frame_report'][behavior]['f1-score'] for r in detailed_fold_results]
+        
+        p_mean, p_std = np.mean(behavior_precisions), np.std(behavior_precisions)
+        r_mean, r_std = np.mean(behavior_recalls), np.std(behavior_recalls)
+        f1_mean, f1_std = np.mean(behavior_f1s), np.std(behavior_f1s)
+        
+        print(f"{behavior:<20} {p_mean:.3f}±{p_std:.3f}  {r_mean:.3f}±{r_std:.3f}  {f1_mean:.3f}±{f1_std:.3f}")
+        
+        behavior_summaries[behavior] = {
+            'precision_mean': p_mean,
+            'precision_std': p_std,
+            'recall_mean': r_mean,
+            'recall_std': r_std,
+            'f1_mean': f1_mean,
+            'f1_std': f1_std
+        }
     
     print("\n" + "="*60)
-    print("These are your reportable metrics - all from cross-validation!")
-    print("DO NOT use in-sample metrics for reporting!")
-    print("="*60)
+    save_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/prediction_plots/metrics_plots")
+    plot_classification_metrics_bar(behavior_summaries, experiment_name, save_dir)
     
     return {
         'cv_frame_f1_mean': cv_frame_f1_mean,
         'cv_frame_f1_std': cv_frame_f1_std,
-        'cv_event_map_mean': cv_event_map_mean,
-        'cv_event_map_std': cv_event_map_std,
         'behavior_summaries': behavior_summaries,
-        'detailed_folds': detailed_fold_results
+        'detailed_folds': detailed_fold_results,
+        'feature_cols': feature_cols
     }
 
-def compare_experiments(base_dir: Path, experiment_names: List[str]):
-    """
-    Compare results across different label expansion experiments.
-    """
-    results_summary = {}
-    
-    for exp_name in experiment_names:
-        exp_dir = base_dir / f"enhanced_{exp_name}"
-        
-        if not exp_dir.exists():
-            print(f"Skipping {exp_name}: directory not found")
-            continue
-        
-        # Find all feature and label files
-        feature_files = sorted(exp_dir.glob('*_enhanced_features.csv'))
-        label_files = sorted(exp_dir.glob('*_expanded_labels.csv'))
-        
-        if len(feature_files) != len(label_files):
-            print(f"Warning: Mismatched files in {exp_name}")
-            continue
-        
-        # Run experiment
-        results = run_experiment(
-            [str(f) for f in feature_files],
-            [str(f) for f in label_files],
-            experiment_name=exp_name
-        )
-        
-        if results:
-            results_summary[exp_name] = results
-    
-    # Print comparison table
-    print(f"\n{'='*80}")
-    print("EXPERIMENT COMPARISON")
-    print('='*80)
-    print(f"{'Experiment':<20} {'CV Frame F1':>15} {'CV Event mAP':>15} {'Improvement':>15}")
-    print("-"*80)
-    
-    for exp_name, results in results_summary.items():
-        frame_f1 = results['cv_frame_f1']
-        event_map = results['cv_event_map']
-        improvement = ((event_map - frame_f1) / frame_f1) * 100 if frame_f1 > 0 else 0
-        
-        print(f"{exp_name:<20} {frame_f1:.3f} ± {results['cv_frame_std']:.3f}    "
-              f"{event_map:.3f} ± {results['cv_event_std']:.3f}    "
-              f"{improvement:+.1f}%")
-    
-    return results_summary
-
 if __name__ == "__main__":
-    # For single experiment
-    base_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process")
-    exp_dir = base_dir / "enhanced_6_4"
+    # Update paths
+    feature_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/enhanced_3_3")
+    label_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/enhanced_3_3")
     
-    if exp_dir.exists():
-        feature_files = sorted(exp_dir.glob('*_enhanced_features.csv'))
-        label_files = sorted(exp_dir.glob('*_expanded_labels.csv'))
+    # Find matching files
+    feature_files = []
+    label_files = []
+    
+    print("Searching for files...")
+    for feature_path in sorted(feature_dir.glob('*_enhanced_features.csv')):
+        base_name = feature_path.stem.replace('_enhanced_features', '')
+        label_path = label_dir / f"{base_name}_expanded_labels.csv"
         
-        print(f"Found {len(feature_files)} enhanced files")
+        if label_path.exists():
+            feature_files.append(str(feature_path))
+            label_files.append(str(label_path))
+            print(f"Found pair: {base_name}")
+    
+    print(f"\nFound {len(feature_files)} matching file pairs")
+    
+    if len(feature_files) > 0:
+        # Run with enhanced features
+        # results_baseline = run_experiment(
+        #     feature_files,
+        #     label_files,
+        #     experiment_name="Baseline (No SMOTE, Auto Weights)",
+        #     hyperparam_search=True,
+        #     use_thresholding=False # Explicitly disable
+        # )
+        results_baseline = None
         
-        # Run with SMOTE and hyperparameter search
-        results = run_experiment(
-            [str(f) for f in feature_files],
-            [str(f) for f in label_files],
-            experiment_name="Label Expansion (6 before, 4 after) with SMOTE",
-            use_smote=True,
-            hyperparam_search=True
+        # Run with thresholding enabled
+        results_thresholding = run_experiment(
+            feature_files,
+            label_files,
+            experiment_name="Strategy 2: With Thresholding",
+            hyperparam_search=True,
+            use_thresholding=True # Enable thresholding
         )
         
-        # Also try without SMOTE for comparison
-        print("\n" + "="*80)
-        print("RUNNING COMPARISON WITHOUT SMOTE")
-        print("="*80)
-        
-        results_no_smote = run_experiment(
-            [str(f) for f in feature_files],
-            [str(f) for f in label_files],
-            experiment_name="Label Expansion (6 before, 4 after) without SMOTE",
-            use_smote=False,
-            hyperparam_search=True
-        )
-        
-        # Compare results
-        if results and results_no_smote:
+        # Print comparison
+        if results_baseline and results_thresholding:
             print("\n" + "="*80)
             print("SMOTE COMPARISON")
             print("="*80)
-            print(f"{'Method':<20} {'Frame F1':>15} {'Event mAP':>15}")
-            print("-"*50)
-            print(f"{'With SMOTE':<20} {results['cv_frame_f1_mean']:.3f} ± {results['cv_frame_f1_std']:.3f}  "
-                  f"{results['cv_event_map_mean']:.3f} ± {results['cv_event_map_std']:.3f}")
-            print(f"{'Without SMOTE':<20} {results_no_smote['cv_frame_f1_mean']:.3f} ± {results_no_smote['cv_frame_f1_std']:.3f}  "
-                  f"{results_no_smote['cv_event_map_mean']:.3f} ± {results_no_smote['cv_event_map_std']:.3f}")
-    
-    # Or compare multiple experiments
-    # compare_experiments(base_dir, ['expand_3_5', 'expand_5_10', 'expand_5_15', 'expand_7_20'])
+            print(f"{'Method':<30} {'Overall F1':>15} {'Attack F1':>15}")
+            print("-"*60)
+            
+            with_f1 = results_thresholding['cv_frame_f1_mean']
+            with_std = results_thresholding['cv_frame_f1_std']
+            with_attack = results_thresholding['behavior_summaries']['attack']['f1_mean']
+            with_attack_std = results_thresholding['behavior_summaries']['attack']['f1_std']
+            
+            no_f1 = results_baseline['cv_frame_f1_mean']
+            no_std = results_baseline['cv_frame_f1_std']
+            no_attack = results_baseline['behavior_summaries']['attack']['f1_mean']
+            no_attack_std = results_baseline['behavior_summaries']['attack']['f1_std']
+            
+            print(f"{'With Thresholding':<30} {with_f1:.3f}±{with_std:.3f}    {with_attack:.3f}±{with_attack_std:.3f}")
+            print(f"{'Without Thresholding':<30} {no_f1:.3f}±{no_std:.3f}    {no_attack:.3f}±{no_attack_std:.3f}")
+            print(f"{'Improvement':<30} {(with_f1-no_f1):+.3f}          {(with_attack-no_attack):+.3f}")
+    else:
+        print("No matching file pairs found!")
