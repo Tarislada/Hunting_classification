@@ -33,7 +33,7 @@ class TimingValidator:
         # Behavior mapping from pipeline to ground truth events
         self.behavior_mapping = {
             'latency_to_hunt': 'chasing',      # First pursuit = first chasing detection
-            'latency_to_attack': 'attack',      # Attack onset = first attack detection
+            # 'latency_to_attack': 'attack',      # Attack onset = first attack detection
             'hunting_duration': 'consumption'   # Consumption = end of hunting sequence
         }
         
@@ -48,7 +48,7 @@ class TimingValidator:
             print(f"Trials per animal: {self.ground_truth.groupby('animal_id')['trial_id'].nunique().to_dict()}")
             
             # Show data completeness
-            timing_cols = ['latency_to_hunt', 'latency_to_attack', 'hunting_duration']
+            timing_cols = ['latency_to_hunt', 'hunting_duration'] #, 'latency_to_attack']
             for col in timing_cols:
                 complete_count = self.ground_truth[col].notna().sum()
                 total_count = len(self.ground_truth)
@@ -82,7 +82,7 @@ class TimingValidator:
             print(f"    No pipeline data found for {animal_id} {trial_id}")
             return {
                 'latency_to_hunt': None,
-                'latency_to_attack': None, 
+                # 'latency_to_attack': None, 
                 'hunting_duration': None
             }
         
@@ -100,10 +100,10 @@ class TimingValidator:
         
         # Extract latency to attack (first attack behavior)
         attack_frames = trial_data[trial_data['behavior'] == 'attack']
-        if len(attack_frames) > 0:
-            timing_events['latency_to_attack'] = attack_frames['frame'].min()
-        else:
-            timing_events['latency_to_attack'] = None
+        # if len(attack_frames) > 0:
+        #     timing_events['latency_to_attack'] = attack_frames['frame'].min()
+        # else:
+        timing_events['latency_to_attack'] = None
         
         # Extract hunting duration (last frame of hunting sequence)
         # This could be last attack frame, or we could define it differently
@@ -216,7 +216,7 @@ class TimingValidator:
                 'notes': gt_row.get('notes', '')
             }
             
-            timing_events = ['latency_to_hunt', 'latency_to_attack', 'hunting_duration']
+            timing_events = ['latency_to_hunt', 'hunting_duration'] #, 'latency_to_attack']
             
             for event in timing_events:
                 gt_value = gt_row[event] if pd.notna(gt_row[event]) else None
@@ -264,7 +264,7 @@ class TimingValidator:
             'events': {}
         }
         
-        timing_events = ['latency_to_hunt', 'latency_to_attack', 'hunting_duration']
+        timing_events = ['latency_to_hunt', 'hunting_duration'] #, 'latency_to_attack']
         
         for event in timing_events:
             gt_col = f'gt_{event}'
@@ -328,10 +328,11 @@ class TimingValidator:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        timing_events = ['latency_to_hunt', 'latency_to_attack', 'hunting_duration']
+        timing_events = ['latency_to_hunt', 'hunting_duration'] #, 'latency_to_attack']
         
         # 1. Scatter plots: Ground Truth vs Pipeline Predictions
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        # fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         
         for i, event in enumerate(timing_events):
             gt_col = f'gt_{event}'
@@ -371,7 +372,8 @@ class TimingValidator:
         plt.close()
         
         # 2. Difference distribution plots
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        # fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         
         for i, event in enumerate(timing_events):
             diff_col = f'diff_{event}'
@@ -398,44 +400,152 @@ class TimingValidator:
         plt.savefig(output_path / 'timing_difference_distributions.png', dpi=300, bbox_inches='tight')
         plt.close()
         
-        # 3. Per-animal comparison
-        animals = self.comparison_results['animal_id'].unique()
+        # # 3. Per-animal comparison
+        # animals = self.comparison_results['animal_id'].unique()
         
-        if len(animals) > 1:
-            fig, ax = plt.subplots(figsize=(12, 8))
+        # if len(animals) > 1:
+        #     fig, ax = plt.subplots(figsize=(12, 8))
             
-            # Create summary by animal
-            animal_summaries = []
-            for animal in animals:
-                animal_data = self.comparison_results[self.comparison_results['animal_id'] == animal]
+        #     # Create summary by animal
+        #     animal_summaries = []
+        #     for animal in animals:
+        #         animal_data = self.comparison_results[self.comparison_results['animal_id'] == animal]
                 
-                for event in timing_events:
-                    abs_diff_col = f'abs_diff_{event}'
-                    valid_diffs = animal_data[animal_data[abs_diff_col].notna()][abs_diff_col]
+        #         for event in timing_events:
+        #             abs_diff_col = f'abs_diff_{event}'
+        #             valid_diffs = animal_data[animal_data[abs_diff_col].notna()][abs_diff_col]
                     
-                    if len(valid_diffs) > 0:
-                        animal_summaries.append({
-                            'animal': animal,
-                            'event': event,
-                            'mean_abs_diff': valid_diffs.mean(),
-                            'n_trials': len(valid_diffs)
-                        })
+        #             if len(valid_diffs) > 0:
+        #                 animal_summaries.append({
+        #                     'animal': animal,
+        #                     'event': event,
+        #                     'mean_abs_diff': valid_diffs.mean(),
+        #                     'n_trials': len(valid_diffs)
+        #                 })
             
-            if animal_summaries:
-                summary_df = pd.DataFrame(animal_summaries)
+        #     if animal_summaries:
+        #         summary_df = pd.DataFrame(animal_summaries)
                 
-                # Pivot for plotting
-                pivot_df = summary_df.pivot(index='animal', columns='event', values='mean_abs_diff')
+        #         # Pivot for plotting
+        #         pivot_df = summary_df.pivot(index='animal', columns='event', values='mean_abs_diff')
                 
-                # Create grouped bar plot
-                pivot_df.plot(kind='bar', ax=ax, rot=45)
-                ax.set_ylabel('Mean Absolute Difference (frames)')
-                ax.set_title('Timing Accuracy by Animal')
-                ax.legend(title='Event', bbox_to_anchor=(1.05, 1), loc='upper left')
+        #         # Create grouped bar plot
+        #         pivot_df.plot(kind='bar', ax=ax, rot=45)
+        #         ax.set_ylabel('Mean Absolute Difference (frames)')
+        #         ax.set_title('Timing Accuracy by Animal')
+        #         ax.legend(title='Event', bbox_to_anchor=(1.05, 1), loc='upper left')
                 
-                plt.tight_layout()
-                plt.savefig(output_path / 'timing_accuracy_by_animal.png', dpi=300, bbox_inches='tight')
-                plt.close()
+        #         plt.tight_layout()
+        #         plt.savefig(output_path / 'timing_accuracy_by_animal.png', dpi=300, bbox_inches='tight')
+        #         plt.close()
+                # --- MODIFIED: Changed from per-animal to per-trial comparison ---
+        # 3. Per-trial comparison to spot outliers
+        
+        # Create a unique label for each trial (e.g., 'm14_t1')
+        plot_data = self.comparison_results.copy()
+        plot_data['trial_label'] = plot_data['animal_id'] + '_' + plot_data['trial_id']
+        
+        # Select the columns with absolute differences
+        diff_cols = [f'abs_diff_{event}' for event in timing_events]
+        
+        # Filter out trials where there is no data to plot
+        plot_data = plot_data.dropna(subset=diff_cols, how='all').set_index('trial_label')
+        
+        if not plot_data.empty:
+            # Dynamically adjust figure height based on number of trials
+            num_trials = len(plot_data)
+            fig_height = max(8, num_trials * 0.4) # Ensure a minimum height
+            
+            fig, ax = plt.subplots(figsize=(12, fig_height))
+            
+            # Create the bar plot
+            plot_data[diff_cols].plot(kind='barh', ax=ax, width=0.8) # Use horizontal bars for readability
+            
+            ax.set_xlabel('Absolute Difference (frames)')
+            ax.set_ylabel('Trial')
+            ax.set_title('Timing Accuracy by Trial')
+            ax.grid(axis='x', linestyle='--', alpha=0.6)
+            
+            # Invert y-axis so trials are in a more natural order
+            ax.invert_yaxis()
+            
+            # Clean up legend labels
+            handles, labels = ax.get_legend_handles_labels()
+            new_labels = [l.replace('abs_diff_', '').replace('_', ' ') for l in labels]
+            ax.legend(handles, new_labels, title='Event', bbox_to_anchor=(1.02, 1), loc='upper left')
+            
+            plt.tight_layout()
+            plt.savefig(output_path / 'timing_accuracy_by_trial.png', dpi=300, bbox_inches='tight')
+            plt.close()
+        else:
+            print("Skipping per-trial plot: No valid absolute differences to plot.")
+
+        # --- NEW: 4. Summary bar plot with animals as samples ---
+        print("Creating summary bar plot with per-animal means...")
+        
+        # Calculate per-animal means
+        animal_means = []
+        for animal in self.comparison_results['animal_id'].unique():
+            animal_data = self.comparison_results[self.comparison_results['animal_id'] == animal]
+            
+            animal_summary = {'animal_id': animal}
+            for event in timing_events:
+                abs_diff_col = f'abs_diff_{event}'
+                valid_diffs = animal_data[animal_data[abs_diff_col].notna()][abs_diff_col]
+                
+                if len(valid_diffs) > 0:
+                    animal_summary[event] = valid_diffs.mean()
+                else:
+                    animal_summary[event] = np.nan
+            
+            animal_means.append(animal_summary)
+        
+        animal_means_df = pd.DataFrame(animal_means)
+        
+        # Calculate mean and SEM across animals for each event
+        summary_stats = []
+        for event in timing_events:
+            valid_animal_means = animal_means_df[animal_means_df[event].notna()][event]
+            
+            if len(valid_animal_means) > 0:
+                summary_stats.append({
+                    'event': event.replace('_', ' ').title(),
+                    'mean': valid_animal_means.mean(),
+                    'sem': valid_animal_means.sem(),
+                    'n_animals': len(valid_animal_means)
+                })
+        
+        if summary_stats:
+            summary_df = pd.DataFrame(summary_stats)
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            x_pos = np.arange(len(summary_df))
+            bars = ax.bar(x_pos, summary_df['mean'], yerr=summary_df['sem'], 
+                         capsize=10, alpha=0.8, color=['steelblue', 'coral'])
+            
+            ax.set_xlabel('Timing Event', fontsize=14, weight='bold')
+            ax.set_ylabel('Mean Absolute Difference (frames)', fontsize=14, weight='bold')
+            ax.set_title('Pipeline Timing Accuracy\n(Animals as Samples)', fontsize=16, weight='bold')
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(summary_df['event'], fontsize=12)
+            ax.grid(axis='y', linestyle='--', alpha=0.7)
+            
+            # Add n= labels on bars
+            for i, (bar, n) in enumerate(zip(bars, summary_df['n_animals'])):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height + summary_df.iloc[i]['sem'],
+                       f'n={int(n)} animals',
+                       ha='center', va='bottom', fontsize=10)
+            
+            plt.tight_layout()
+            plt.savefig(output_path / 'timing_accuracy_summary.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"Saved summary bar plot (n={summary_df['n_animals'].iloc[0]} animals)")
+        else:
+            print("Skipping summary bar plot: No valid data")
+
         
         print(f"Validation plots saved to: {output_path}")
     
@@ -504,3 +614,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+#     python utils/timing_validator.py \
+#   --ground-truth ground_truth_timing.csv \
+#   --pipeline-results "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/prediction_plots/timing_analysis_files/Strategy_2:_With_Thresholding" \
+#   --output-dir "/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/prediction_plots/timing_analysis_files/timing_validation_results/"
