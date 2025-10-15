@@ -13,8 +13,21 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from collections import defaultdict
 import re
+from pathlib import Path
+from abc import ABC, abstractmethod
+import sys
 
-class EnhancedFeatureEngineer:
+# FIX THE IMPORT PATH
+sys.path.append(str(Path(__file__).parent.parent))
+
+from processing.raw_data_loader import RawDataLoader
+
+class FeatureEngineer(ABC):
+    @abstractmethod
+    def engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        pass
+
+class EnhancedFeatureEngineer(FeatureEngineer):
     """
     Comprehensive feature engineering for attack vs consume discrimination.
     Focuses on motion dynamics, prey-relative features, and temporal patterns.
@@ -258,7 +271,97 @@ class EnhancedFeatureEngineer:
             df['cricket_in_binocular'] = (df['zone'] == 'binocular').astype('int8')
         
         return df
-    
+
+    def load_raw_data_for_xgboost(keypoint_dir: Path, cricket_dir: Path, label_dir: Path) -> Tuple[List[str], List[str]]:
+        """
+        Load raw pose + cricket data and return as fake 'feature files' and 'label files'
+        that can be processed by the existing pipeline.
+        
+        Returns lists of file paths that will be used to load data.
+        """
+        print("\n" + "="*60)
+        print("LOADING RAW POSE DATA FOR XGBOOST")
+        print("="*60)
+        
+        raw_loader = RawDataLoader()
+        
+        # Find matching files
+        keypoint_files, cricket_files, label_files = raw_loader.find_matching_files(
+            keypoint_dir, cricket_dir, label_dir
+        )
+        
+        print(f"Found {len(keypoint_files)} matching file sets")
+        
+        # We'll return the label files as-is, but we need to process the keypoint+cricket data
+        # and save it to temporary CSV files that look like "feature files"
+        
+        from pathlib import Path
+        import tempfile
+        
+        # Create a temporary directory to store processed raw features
+        temp_dir = Path(tempfile.mkdtemp(prefix="xgb_raw_features_"))
+        print(f"Temporary feature directory: {temp_dir}")
+        
+        processed_feature_files = []
+        processed_label_files = []
+        
+        for kp_file, cr_file, lb_file in zip(keypoint_files, cricket_files, label_files):
+            try:
+                # Extract trial ID
+                base_name = Path(kp_file).stem
+                match = re.search(r'(m\d+_t\d+)', base_name)
+                if not match:
+                    print(f"Warning: Could not extract trial ID from {base_name}")
+                    continue
+                trial_id = match.group(1)
+                
+                # Load raw data for this trial
+                keypoint_df = pd.read_csv(kp_file)
+                cricket_df = pd.read_csv(cr_file)
+                label_df = pd.read_csv(lb_file)
+                
+                # Merge keypoint and cricket data on frame
+                merged = pd.merge(keypoint_df, cricket_df, on='frame', how='inner')
+                
+                # Add basic computed features that XGBoost needs
+                # (distance, angles, etc. - the "raw" features before rolling windows/lags)
+                if 'nose_x' in merged.columns and 'nose_y' in merged.columns:
+                    if 'cricket_x' in merged.columns and 'cricket_y' in merged.columns:
+                        # Calculate distance
+                        merged['distance'] = np.sqrt(
+                            (merged['nose_x'] - merged['cricket_x'])**2 + 
+                            (merged['nose_y'] - merged['cricket_y'])**2
+                        )
+                        
+                        # Calculate cricket angle relative to nose
+                        merged['cricket_angle'] = np.arctan2(
+                            merged['cricket_y'] - merged['nose_y'],
+                            merged['cricket_x'] - merged['nose_x']
+                        ) * 180 / np.pi
+                
+                # Calculate head angle if we have nose and body center
+                if 'nose_x' in merged.columns and 'body_center_x' in merged.columns:
+                    merged['head_angle'] = np.arctan2(
+                        merged['nose_y'] - merged['body_center_y'],
+                        merged['nose_x'] - merged['body_center_x']
+                    ) * 180 / np.pi
+                
+                # Save to temporary CSV
+                temp_feature_file = temp_dir / f"{trial_id}_raw_features.csv"
+                merged.to_csv(temp_feature_file, index=False)
+                
+                processed_feature_files.append(str(temp_feature_file))
+                processed_label_files.append(lb_file)
+                
+                print(f"  Processed {trial_id}: {len(merged)} frames")
+                
+            except Exception as e:
+                print(f"Error processing {Path(kp_file).stem}: {e}")
+                continue
+        
+        print(f"\nSuccessfully processed {len(processed_feature_files)} trials")
+        return processed_feature_files, processed_label_files
+
     def engineer_features(self, df):
         """Main feature engineering pipeline."""
         print("\nEngineering features...")
@@ -298,18 +401,79 @@ class EnhancedFeatureEngineer:
         print("Feature engineering complete!")
         
         return df
+class MinimalFeatureEngineer(FeatureEngineer):
+    """
+    Minimal feature engineering for raw pose data.
+    Only includes basic computations, NO temporal features (lags, rolling windows).
+    """
+    
+    def __init__(self):
+        self.feature_names = []
+    
+    def parse_coordinates(self, df):
+        """Parse coordinate strings if needed."""
+        coord_features = ['tail_base', 'body_center', 'nose']
+        
+        for coord_col in coord_features:
+            if coord_col in df.columns and df[coord_col].dtype == 'object':
+                try:
+                    df[f'{coord_col}_x'] = df[coord_col].str.extract(r'\(([-\d.]+),').astype('float32')
+                    df[f'{coord_col}_y'] = df[coord_col].str.extract(r',\s*([-\d.]+)\)').astype('float32')
+                except:
+                    pass
+        
+        return df
+    
+    def add_basic_kinematics(self, df):
+        """Add instantaneous velocity only (no rolling windows or lags)."""
+        
+        # Distance velocity (approach speed)
+        if 'distance' in df.columns:
+            df['distance_velocity'] = df['distance'].diff().astype('float32')
+        
+        # Angle velocities
+        if 'head_angle' in df.columns:
+            df['head_angle_velocity'] = df['head_angle'].diff().astype('float32')
+        
+        if 'cricket_angle' in df.columns:
+            df['cricket_angle_velocity'] = df['cricket_angle'].diff().astype('float32')
+        
+        # Relative angle
+        if 'cricket_angle' in df.columns and 'head_angle' in df.columns:
+            df['relative_angle'] = (df['cricket_angle'] - df['head_angle']).astype('float32')
+            df['relative_angle_velocity'] = df['relative_angle'].diff().astype('float32')
+        
+        return df
+    
+    def engineer_features(self, df):
+        """Main pipeline - ONLY basic features, no temporal engineering."""
+        print("  Applying minimal feature engineering (raw features only)...")
+        
+        df = df.copy()
+        df = self.parse_coordinates(df)
+        df = self.add_basic_kinematics(df)
+        
+        return df        
 def plot_prediction_bands(y_true, y_pred, encoder, title, save_dir):
     """
     Generates a band-style plot comparing true and predicted labels for a trial.
     """
     import matplotlib.patches as mpatches
 
-    # Define a consistent color map for your new labels
+    # Define a consistent color map with publication-quality labels
     color_map = {
         'attack': '#66c2a5',      # Teal
         'background': '#8da0cb',  # Blue
         'chasing': '#e78ac3',      # Pink/Purple
         'consume': '#ffd92f'      # Yellow
+    }
+    
+    # Display labels for publication (present continuous tense)
+    display_labels = {
+        'attack': 'Attacking',
+        'background': 'Other',
+        'chasing': 'Chasing',
+        'consume': 'Consuming'
     }
     
     # Get integer labels for the colors
@@ -318,8 +482,8 @@ def plot_prediction_bands(y_true, y_pred, encoder, title, save_dir):
     # Create a 2xN array representing the two bands
     num_frames = len(y_true)
     bands = np.zeros((2, num_frames))
-    bands[0, :] = y_true  # Predicted
-    bands[1, :] = y_pred  # True
+    bands[0, :] = y_true  # True
+    bands[1, :] = y_pred  # Predicted
     
     # Create a colormap from our dictionary
     cmap_colors = [int_to_color.get(i, '#ffffff') for i in range(len(encoder.classes_))]
@@ -336,8 +500,9 @@ def plot_prediction_bands(y_true, y_pred, encoder, title, save_dir):
     ax.set_xlabel('Frame Number')
     ax.set_title(title)
     
-    # Create a custom legend
-    legend_patches = [mpatches.Patch(color=color, label=name) for name, color in color_map.items() if name in encoder.classes_]
+    # Create a custom legend with display labels
+    legend_patches = [mpatches.Patch(color=color, label=display_labels.get(name, name)) 
+                     for name, color in color_map.items() if name in encoder.classes_]
     ax.legend(handles=legend_patches, bbox_to_anchor=(1.01, 1), loc='upper left')
     
     # Ensure the save directory exists
@@ -346,22 +511,24 @@ def plot_prediction_bands(y_true, y_pred, encoder, title, save_dir):
     
     plt.tight_layout()
     plt.savefig(save_path)
-    plt.close(fig) # Close the figure to save memory
+    plt.close(fig)
     print(f"Saved prediction band plot to {save_path}")
     
 def plot_classification_metrics_bar(behavior_summaries: Dict, experiment_name: str, save_dir: Path) -> None:
     """
     Create a grouped bar chart showing precision, recall, and F1-score for each behavior class.
-    
-    Args:
-        behavior_summaries: Dictionary containing per-behavior metrics from CV
-        experiment_name: Name of the experiment for the title
-        save_dir: Directory to save the plot
     """
     print("\nGenerating classification metrics bar chart...")
     
     # Filter to only the behaviors we care about
     behaviors_of_interest = ['chasing', 'attack', 'consume']
+    
+    # Display labels for publication
+    display_labels = {
+        'attack': 'Attacking',
+        'chasing': 'Chasing',
+        'consume': 'Consuming'
+    }
     
     # Prepare data for plotting
     behaviors = []
@@ -374,7 +541,7 @@ def plot_classification_metrics_bar(behavior_summaries: Dict, experiment_name: s
     
     for behavior in behaviors_of_interest:
         if behavior in behavior_summaries:
-            behaviors.append(behavior.capitalize())
+            behaviors.append(display_labels.get(behavior, behavior))  # Use display label
             precision_means.append(behavior_summaries[behavior]['precision_mean'])
             precision_stds.append(behavior_summaries[behavior]['precision_std'])
             recall_means.append(behavior_summaries[behavior]['recall_mean'])
@@ -437,7 +604,9 @@ def run_experiment(feature_files: List[str], label_files: List[str],
                   experiment_name: str = "Experiment",
                   use_smote: bool = True,
                   hyperparam_search: bool = True,
-                  use_thresholding: bool = False):
+                  use_thresholding: bool = False,
+                  feature_engineer= None # Pass the feature engineer
+):
     """
     Run experiment with comprehensive feature engineering.
     SIMPLIFIED: Frame-level metrics only, no event metrics.
@@ -449,7 +618,9 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     print('='*60)
     
     # Initialize feature engineer
-    feature_engineer = EnhancedFeatureEngineer()
+    # feature_engineer = EnhancedFeatureEngineer()
+    if feature_engineer is None:
+        feature_engineer = EnhancedFeatureEngineer()
     
     # Load and combine all data
     all_data = []
@@ -495,7 +666,7 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     
     # Prepare features and labels
     exclude_cols = ['frame', 'behavior', 'animal_id', 'trial_id', 'cricket_status', 'validation', 
-                   'zone', 'tail_base', 'body_center', 'nose', 'cricket_use_nose_position']
+                   'zone', 'tail_base', 'body_center', 'nose', 'cricket_use_nose_position','status','use_nose_position','prolonged_immobility']
     feature_cols = [col for col in data.columns if col not in exclude_cols and not col.startswith('Unnamed')]
     
     # Handle missing values
@@ -515,8 +686,12 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     print(f"Hyperparameter search: {'Enabled' if hyperparam_search else 'Disabled'}")
     
     # Cross-validation setup
-    cv = GroupKFold(n_splits=4)
-    cv_splits = list(cv.split(X, y, groups))
+    try: 
+        cv = GroupKFold(n_splits=4)
+        cv_splits = list(cv.split(X, y, groups))
+    except:
+        cv = GroupKFold(n_splits=3)
+        cv_splits = list(cv.split(X, y, groups))
     
     # Storage for CV results
     frame_scores = []
@@ -741,12 +916,23 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     print("FINAL CROSS-VALIDATION RESULTS")
     print('='*60)
     
+    # Display labels for publication
+    display_labels = {
+        'attack': 'Attacking',
+        'background': 'Other',
+        'chasing': 'Chasing',
+        'consume': 'Consuming'
+    }
+    
     # Aggregated confusion matrix
     y_true_all_folds = np.concatenate(all_y_test_agg)
     y_pred_all_folds = np.concatenate(all_y_pred_agg)
     
     cm = confusion_matrix(y_true_all_folds, y_pred_all_folds, normalize='true')
-    cm_df = pd.DataFrame(cm, index=target_encoder.classes_, columns=target_encoder.classes_)
+    
+    # Convert class names to display labels for confusion matrix
+    display_class_names = [display_labels.get(cls, cls) for cls in target_encoder.classes_]
+    cm_df = pd.DataFrame(cm, index=display_class_names, columns=display_class_names)
     
     plt.figure(figsize=(10, 8))
     sns.heatmap(cm_df, annot=True, fmt='.2f', cmap='Blues')
@@ -803,25 +989,131 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     }
 
 if __name__ == "__main__":
+    # --- CONFIGURATION ---
+    FEATURE_TYPE = 'engineered'  # Options: 'raw' or 'engineered'
+    USE_SMOTE = True
+    HYPERPARAM_SEARCH = True
+    USE_THRESHOLDING = True
+    EXPERIMENT_NAME = f"XGBoost_{FEATURE_TYPE.capitalize()}_Features"
+    
+    print(f"\n{'='*80}")
+    print(f"CONFIGURATION")
+    print('='*80)
+    print(f"Feature Type: {FEATURE_TYPE}")
+    print(f"Use SMOTE: {USE_SMOTE}")
+    print(f"Hyperparameter Search: {HYPERPARAM_SEARCH}")
+    print(f"Use Thresholding: {USE_THRESHOLDING}")
+    print(f"Experiment Name: {EXPERIMENT_NAME}")
+    print('='*80)
+
     # Update paths
     feature_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/enhanced_3_3")
     label_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/enhanced_3_3")
-    
-    # Find matching files
-    feature_files = []
-    label_files = []
-    
-    print("Searching for files...")
-    for feature_path in sorted(feature_dir.glob('*_enhanced_features.csv')):
-        base_name = feature_path.stem.replace('_enhanced_features', '')
-        label_path = label_dir / f"{base_name}_expanded_labels.csv"
+        # --- Data Loading ---
+    if FEATURE_TYPE == 'engineered':
+        print("\nSearching for ENGINEERED feature files...")
         
-        if label_path.exists():
-            feature_files.append(str(feature_path))
-            label_files.append(str(label_path))
-            print(f"Found pair: {base_name}")
+        # Find matching files
+        feature_files = []
+        label_files = []
+        
+        for feature_path in sorted(feature_dir.glob('*_enhanced_features.csv')):
+            base_name = feature_path.stem.replace('_enhanced_features', '')
+            label_path = label_dir / f"{base_name}_expanded_labels.csv"
+            
+            if label_path.exists():
+                feature_files.append(str(feature_path))
+                label_files.append(str(label_path))
+                print(f"  Found pair: {base_name}")
+        
+        print(f"\nFound {len(feature_files)} matching ENGINEERED feature file pairs")
+        
+        if len(feature_files) == 0:
+            print("ERROR: No engineered feature files found!")
+            exit(1)
+        
+        # Use the full EnhancedFeatureEngineer (already does engineering)
+        feature_engineer_instance = EnhancedFeatureEngineer()
     
-    print(f"\nFound {len(feature_files)} matching file pairs")
+    elif FEATURE_TYPE == 'raw':
+        print("\nLoading RAW pose data...")
+        keypoint_dir = Path("SKH_FP/savgol_pose_w59p7")
+        cricket_dir = Path("SKH_FP/FInalized_process/cricket_process_test5")
+        label_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/Behavior_label")
+
+        # Load raw data and create temporary feature files
+        rawdataloader = RawDataLoader()
+        print("Finding matching keypoint, cricket, and label files...")
+        keypoint_files, cricket_files, label_files_raw = rawdataloader.find_matching_files(
+            keypoint_dir, cricket_dir, label_dir
+        )
+        
+        print(f"Found {len(keypoint_files)} matching file sets")
+        
+        if len(keypoint_files) == 0:
+            print("ERROR: No matching raw data files found!")
+            exit(1)
+        
+        # STEP 2: Load and merge the raw data
+        print("Loading and processing raw data...")
+        all_data_raw = rawdataloader.load_raw_data(
+            keypoint_files, cricket_files, label_files_raw, batch_size=5
+        )
+        
+        if all_data_raw is None or len(all_data_raw) == 0:
+            print("ERROR: Failed to load raw data!")
+            exit(1)
+        
+        # STEP 3: Prepare the data (scaling, encoding, etc.)
+        print("Preparing raw features for XGBoost...")
+        X_raw, y_raw, groups_raw, feature_names_raw = rawdataloader.prepare_data(all_data_raw)
+        
+        print(f"Raw features shape: {X_raw.shape}")
+        print(f"Number of raw features: {X_raw.shape[1]}")
+        print(f"First 10 features: {feature_names_raw[:10]}")
+        
+        # STEP 4: Save to temporary CSV files for the experiment pipeline
+        # The experiment expects file paths, so we need to create temporary files
+        import tempfile
+        
+        temp_dir = Path(tempfile.mkdtemp(prefix="xgb_raw_features_"))
+        print(f"Creating temporary feature files in: {temp_dir}")
+        
+        feature_files = []
+        label_files = []
+        
+        # Group data by trial_id and save each trial separately
+        for trial_id in all_data_raw['trial_id'].unique():
+            trial_data = all_data_raw[all_data_raw['trial_id'] == trial_id].copy()
+            
+            # IMPORTANT: Extract animal_id from the trial_data
+            # The animal_id column should exist in all_data_raw from raw_data_loader
+            animal_id = trial_data['animal_id'].iloc[0]  # Get the animal_id for this trial
+            
+            # Create filename with both animal_id and trial_id to match expected format
+            # Format: m14_t1_raw_features.csv (matches the expected "m\d+" pattern)
+            filename_base = f"{animal_id}_{trial_id}"  # e.g., "m14_t1"
+            
+            feature_columns = [col for col in trial_data.columns if col != 'behavior']
+            
+            # Save feature file (contains features + frame column)
+            feature_file = temp_dir / f"{filename_base}_raw_features.csv"
+            trial_data[feature_columns].to_csv(feature_file, index=False)
+            feature_files.append(str(feature_file))
+            
+            # Save label file (contains frame + behavior columns)
+            label_file = temp_dir / f"{filename_base}_raw_labels.csv"
+            trial_data[['frame', 'behavior']].to_csv(label_file, index=False)
+            label_files.append(str(label_file))
+            
+            print(f"  Saved {filename_base}: {len(trial_data)} frames")
+        
+        print(f"\nPrepared {len(feature_files)} RAW feature file pairs")
+        
+        # Use minimal feature engineer (no temporal features)
+        feature_engineer_instance = MinimalFeatureEngineer()
+    else:
+        raise ValueError("Invalid FEATURE_TYPE")
     
     if len(feature_files) > 0:
         # Run with enhanced features
@@ -840,7 +1132,8 @@ if __name__ == "__main__":
             label_files,
             experiment_name="Strategy 2: With Thresholding",
             hyperparam_search=True,
-            use_thresholding=True # Enable thresholding
+            use_thresholding=True, # Enable thresholding
+            feature_engineer=feature_engineer_instance
         )
         
         # Print comparison
