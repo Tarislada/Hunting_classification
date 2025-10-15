@@ -358,7 +358,55 @@ class TrackingDataVisualizer:
         
         return cricket_in_frame, cricket_out_frame
 
-
+    def calculate_attack_statistics(self, data: pd.DataFrame) -> Dict:
+        """
+        Calculate average statistics specifically during attack behavior.
+        
+        Returns:
+            Dictionary containing mean, median, std for key metrics during attack
+        """
+        print("Calculating statistics during attack behavior...")
+        
+        if 'behavior' not in data.columns:
+            print("Warning: 'behavior' column not found.")
+            return {}
+        
+        attack_data = data[data['behavior'] == 'attack']
+        
+        if attack_data.empty:
+            print("Warning: No attack frames found in data.")
+            return {}
+        
+        metrics = ['distance', 'cricket_angle', 'head_angle', 'speed', 'mouse_speed']
+        attack_stats = {}
+        
+        print(f"\nAttack behavior statistics (n={len(attack_data)} frames):")
+        print("-" * 50)
+        
+        for metric in metrics:
+            if metric in attack_data.columns:
+                valid_data = attack_data[metric].dropna()
+                
+                if len(valid_data) > 0:
+                    attack_stats[metric] = {
+                        'count': len(valid_data),
+                        'mean': valid_data.mean(),
+                        'median': valid_data.median(),
+                        'std': valid_data.std(),
+                        'min': valid_data.min(),
+                        'max': valid_data.max(),
+                        'q25': valid_data.quantile(0.25),
+                        'q75': valid_data.quantile(0.75)
+                    }
+                    
+                    print(f"{metric}:")
+                    print(f"  Mean: {attack_stats[metric]['mean']:.2f}")
+                    print(f"  Median: {attack_stats[metric]['median']:.2f}")
+                    print(f"  Std: {attack_stats[metric]['std']:.2f}")
+                    print(f"  Range: [{attack_stats[metric]['min']:.2f}, {attack_stats[metric]['max']:.2f}]")
+        
+        return attack_stats
+        
     def plot_histograms(self, data: pd.DataFrame, save_individual: bool = True) -> None:
         """Create histogram plots for each metric."""
         metrics_config = {
@@ -618,6 +666,14 @@ class TrackingDataVisualizer:
             print(f"Warning: Missing one of required columns {required_cols} for relative speed plot.")
             return
 
+        # Display labels for publication
+        display_labels = {
+            'attack': 'Attacking',
+            'background': 'Other',
+            'chasing': 'Chasing',
+            'consume': 'Consuming'
+        }
+
         plot_data = data.copy()
         plot_data = plot_data.sort_values(by=['file', 'frame'])
         plot_data['relative_speed'] = plot_data.groupby('file')['distance'].diff()
@@ -626,40 +682,43 @@ class TrackingDataVisualizer:
         filtered_data = plot_data[plot_data['behavior'].isin(behaviors_of_interest)].dropna(subset=['relative_speed'])
 
         if filtered_data.empty:
-            print("No data found for 'chasing', 'attack', or 'consuming' behaviors to plot relative speed.")
+            print("No data found for key behaviors to plot relative speed.")
             return
+
+        # Create display behavior column
+        filtered_data['behavior_display'] = filtered_data['behavior'].map(display_labels)
 
         plt.figure(figsize=(10, 8))
         
-        # --- MODIFIED: Hybrid Plot Logic ---
         # Behaviors with variance get a violin plot
         violin_behaviors = ['chasing', 'attack']
+        violin_display = [display_labels[b] for b in violin_behaviors]
         violin_data = filtered_data[filtered_data['behavior'].isin(violin_behaviors)]
 
-        # Behaviors with no variance (like 'consuming') get a strip plot
+        # Behaviors with no variance get a strip plot
         strip_behaviors = ['consume']
+        strip_display = [display_labels[b] for b in strip_behaviors]
         strip_data = filtered_data[filtered_data['behavior'].isin(strip_behaviors)]
 
-        # 1. Draw the violin plots for chasing and attack
+        # Draw the violin plots
         if not violin_data.empty:
             ax = sns.violinplot(
                 data=violin_data, 
-                x='behavior', 
+                x='behavior_display', 
                 y='relative_speed', 
-                order=violin_behaviors,
+                order=violin_display,
                 palette='muted',
                 inner='quartile',
-                # REMOVED cut=0 to get smooth violins
             )
         
-        # 2. Draw the strip plot for consuming
+        # Draw the strip plot
         if not strip_data.empty:
             sns.stripplot(
                 data=strip_data,
-                x='behavior',
+                x='behavior_display',
                 y='relative_speed',
-                order=strip_behaviors,
-                color=sns.color_palette('muted')[2], # Match the 3rd color in the palette
+                order=strip_display,
+                color=sns.color_palette('muted')[2],
                 jitter=0.1,
                 size=5,
                 alpha=0.7
@@ -690,59 +749,61 @@ class TrackingDataVisualizer:
             print("Warning: 'behavior' or 'zone' not available for zone usage analysis.")
             return
 
+        # Display labels for publication
+        display_labels = {
+            'attack': 'Attacking',
+            'chasing': 'Chasing',
+            'consume': 'Consuming'
+        }
+
         # Prepare data
         plot_data = data.copy()
         plot_data['simple_zone'] = plot_data['zone'].replace({
             'right_monocular': 'Monocular',
             'left_monocular': 'Monocular',
             'binocular': 'Binocular',
-            'out_of_sight': 'Out of Sight'  # <-- ADD THIS
+            'out_of_sight': 'Out of Sight'
         })
 
         behaviors_of_interest = ['chasing', 'attack', 'consume']
         filtered_data = plot_data[plot_data['behavior'].isin(behaviors_of_interest)].copy()
-        filtered_data['behavior'] = filtered_data['behavior'].str.capitalize()
+        filtered_data['behavior_display'] = filtered_data['behavior'].map(display_labels)
 
         if filtered_data.empty:
             print("No data found for key behaviors.")
             return
 
-        # --- Statistical Analysis: Chi-square test ---
+        # --- Statistical Analysis ---
         from scipy.stats import chi2_contingency
         
-        # Create contingency table for attack vs. non-attack
         attack_data = plot_data.copy()
         attack_data['is_attack'] = (attack_data['behavior'] == 'attack').astype(int)
         contingency_table = pd.crosstab(attack_data['is_attack'], attack_data['simple_zone'])
         
         chi2, p_value, dof, expected = chi2_contingency(contingency_table)
         
-        # Calculate Cramér's V (effect size)
         n = contingency_table.sum().sum()
         cramers_v = np.sqrt(chi2 / (n * (min(contingency_table.shape) - 1)))
         
-        # Calculate conditional probabilities
-        attack_bino = len(filtered_data[(filtered_data['behavior'] == 'Attack') & 
+        attack_bino = len(filtered_data[(filtered_data['behavior'] == 'attack') & 
                                         (filtered_data['simple_zone'] == 'Binocular')])
-        attack_total = len(filtered_data[filtered_data['behavior'] == 'Attack'])
+        attack_total = len(filtered_data[filtered_data['behavior'] == 'attack'])
         p_bino_given_attack = attack_bino / attack_total if attack_total > 0 else 0
         
         print(f"\nStatistical Analysis:")
         print(f"  Chi-square: χ²={chi2:.2f}, p={p_value:.2e}, Cramér's V={cramers_v:.3f}")
         print(f"  P(Binocular | Attack) = {p_bino_given_attack:.3f}")
 
-        # --- Create Grouped Bar Chart ---
-        # Calculate proportions for each behavior
-        behavior_zone_counts = filtered_data.groupby(['behavior', 'simple_zone']).size().unstack(fill_value=0)
+        # --- Grouped Bar Chart ---
+        behavior_zone_counts = filtered_data.groupby(['behavior_display', 'simple_zone']).size().unstack(fill_value=0)
         behavior_zone_props = behavior_zone_counts.div(behavior_zone_counts.sum(axis=1), axis=0)
 
         fig, ax = plt.subplots(figsize=(10, 7))
         
-        # --- FIXED: Define colors for all possible zones ---
         colors = {
             'Binocular': '#4CAF50', 
             'Monocular': '#BDBDBD',
-            'Out of Sight': '#FF6B6B'  # Add a color for out_of_sight (red-ish)
+            'Out of Sight': '#FF6B6B'
         }
         
         behavior_zone_props.plot(kind='bar', stacked=False, ax=ax, 
@@ -757,7 +818,6 @@ class TrackingDataVisualizer:
         ax.legend(title='Zone', fontsize=11, title_fontsize=12)
         ax.grid(axis='y', linestyle='--', alpha=0.7)
         
-        # Add statistical annotation
         stats_text = (f"Chi-square test: χ²={chi2:.2f}, p={p_value:.2e}\n"
                      f"Cramér's V={cramers_v:.3f}\n"
                      f"P(Binocular | Attack) = {p_bino_given_attack:.2%}")
@@ -769,27 +829,26 @@ class TrackingDataVisualizer:
         plt.close()
         print("Saved zone usage bar chart.")
 
-        # --- Create Three Pie Charts ---
+        # --- Three Pie Charts ---
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         
-        # --- FIXED: Update colors dictionary to include all zones ---
         pie_colors = {
             'Binocular': '#4CAF50', 
             'Monocular': '#BDBDBD',
             'Out of Sight': '#FF6B6B'
         }
         
-        for idx, behavior in enumerate(['Chasing', 'Attack', 'Consume']):
-            behavior_data = filtered_data[filtered_data['behavior'] == behavior]
+        display_behaviors = [display_labels[b] for b in ['chasing', 'attack', 'consume']]
+        
+        for idx, (behavior_key, behavior_display) in enumerate(zip(['chasing', 'attack', 'consume'], display_behaviors)):
+            behavior_data = filtered_data[filtered_data['behavior'] == behavior_key]
             zone_counts = behavior_data['simple_zone'].value_counts()
             
             if not zone_counts.empty:
-                # Ensure all zones are present for consistent coloring
                 for zone in ['Binocular', 'Monocular', 'Out of Sight']:
                     if zone not in zone_counts:
                         zone_counts[zone] = 0
-                
-                # Remove zones with zero count for cleaner pie chart
+            
                 zone_counts = zone_counts[zone_counts > 0]
                 
                 wedges, texts, autotexts = axes[idx].pie(
@@ -801,21 +860,19 @@ class TrackingDataVisualizer:
                     textprops={'fontsize': 11, 'weight': 'bold'}
                 )
                 
-                # Make percentage text more visible
                 for autotext in autotexts:
                     autotext.set_color('white')
                     autotext.set_fontsize(12)
                 
-                axes[idx].set_title(f'{behavior}\n(n={len(behavior_data)} frames)', 
+                axes[idx].set_title(f'{behavior_display}\n(n={len(behavior_data)} frames)', 
                                    fontsize=13, weight='bold', pad=10)
             else:
                 axes[idx].text(0.5, 0.5, 'No data', ha='center', va='center')
-                axes[idx].set_title(behavior, fontsize=13, weight='bold')
+                axes[idx].set_title(behavior_display, fontsize=13, weight='bold')
         
         fig.suptitle('Visual Field Usage During Key Behaviors', 
                     fontsize=16, weight='bold', y=1.02)
         
-        # Add statistical annotation to the figure
         fig.text(0.5, -0.05, stats_text, ha='center', fontsize=10,
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
         
@@ -824,12 +881,17 @@ class TrackingDataVisualizer:
         plt.close()
         print("Saved zone usage pie charts.")
 
-    def save_statistics_summary(self, data: pd.DataFrame, stats: Dict, chasing_stats: Dict, corr_stats: Optional[Dict]) -> None:
+    def save_statistics_summary(self, data: pd.DataFrame, stats: Dict, chasing_stats: Dict, 
+                                corr_stats: Optional[Dict], attack_behavior_stats: Dict) -> None:  # NEW PARAMETER
         """Save statistical summary to CSV and text files."""
         # Create summary DataFrame
         summary_df = pd.DataFrame(stats).T
         summary_df.to_csv(self.output_dir / 'statistics_summary.csv')
         
+        if attack_behavior_stats:
+            attack_summary_df = pd.DataFrame(attack_behavior_stats).T
+            attack_summary_df.to_csv(self.output_dir / 'attack_statistics_summary.csv')
+                    
         # Create detailed text report
         with open(self.output_dir / 'data_summary_report.txt', 'w') as f:
             f.write("ANIMAL TRACKING DATA ANALYSIS REPORT\n")
@@ -838,60 +900,91 @@ class TrackingDataVisualizer:
             f.write(f"Total frames analyzed: {len(data)}\n")
             f.write(f"Unique files: {data['file'].nunique() if 'file' in data.columns else 'N/A'}\n\n")
             
+            # Overall statistics
+            f.write("OVERALL STATISTICS:\n")
+            f.write("=" * 50 + "\n")
             for metric, metric_stats in stats.items():
-                f.write(f"{metric.upper().replace('_', ' ')} STATISTICS:\n")
+                f.write(f"\n{metric.upper().replace('_', ' ')}:\n")
                 f.write("-" * 30 + "\n")
                 for stat_name, value in metric_stats.items():
                     f.write(f"{stat_name.capitalize()}: {value:.3f}\n")
-                f.write("\n")
-
+            
+            # Chasing-specific statistics
+            if attack_behavior_stats:
+                f.write("\n\n")
+                f.write("STATISTICS DURING ATTACK BEHAVIOR:\n")
+                f.write("=" * 50 + "\n")
+                for metric, metric_stats in attack_behavior_stats.items():
+                    f.write(f"\n{metric.upper().replace('_', ' ')} (Attack Only):\n")
+                    f.write("-" * 30 + "\n")
+                    for stat_name, value in metric_stats.items():
+                        if stat_name != 'count':
+                            f.write(f"{stat_name.capitalize()}: {value:.3f}\n")
+                        else:
+                            f.write(f"{stat_name.capitalize()}: {value}\n")
+                            
+            # Correlation statistics
             if corr_stats:
-                f.write("HEAD ANGLE VS SPEED CORRELATION:\n")
+                f.write("\n\nHEAD ANGLE VS SPEED CORRELATION:\n")
                 f.write("-" * 30 + "\n")
                 f.write(f"Spearman's ρ: {corr_stats['original']['rho_value']:.3f}\n")
-                f.write(f"P-value: {corr_stats['original']['p_value']:.3g}\n\n")
+                f.write(f"P-value: {corr_stats['original']['p_value']:.3g}\n")
 
-            if 'transformed' in corr_stats:
-                f.write("HEAD ANGLE VS SPEED CORRELATION (LOG-TRANSFORMED):\n")
-                f.write("-" * 30 + "\n")
-                f.write(f"Spearman's ρ: {corr_stats['transformed']['rho_value']:.3f}\n")
-                f.write(f"P-value: {corr_stats['transformed']['p_value']:.3g}\n\n")
+                if 'transformed' in corr_stats:
+                    f.write("\nHEAD ANGLE VS SPEED CORRELATION (LOG-TRANSFORMED):\n")
+                    f.write("-" * 30 + "\n")
+                    f.write(f"Spearman's ρ: {corr_stats['transformed']['rho_value']:.3f}\n")
+                    f.write(f"P-value: {corr_stats['transformed']['p_value']:.3g}\n")
 
+            # Zone distribution
             if 'zone' in data.columns:
-                f.write("VISUAL FIELD ZONES:\n")
+                f.write("\n\nVISUAL FIELD ZONES:\n")
                 f.write("-" * 30 + "\n")
                 zone_counts = data['zone'].value_counts()
                 total_zones = zone_counts.sum()
                 for zone, count in zone_counts.items():
                     percentage = (count / total_zones) * 100
                     f.write(f"{zone}: {count} ({percentage:.1f}%)\n")
-                f.write("\n")
 
-            f.write("CHASING ZONE ANALYSIS:\n")
-            f.write("-" * 30 + "\n")
+            # Chasing zone analysis
+            f.write("\n\nCHASING ZONE ANALYSIS:\n")
+            f.write("=" * 50 + "\n")
             f.write(f"Total chasing frames: {chasing_stats.get('total_chasing_frames', 0)}\n")
-            f.write(f"Monocular chasing / Total chasing: {chasing_stats.get('mono_chasing_ratio', 0):.3f}\n")
-            f.write(f"Binocular chasing / Total chasing: {chasing_stats.get('bino_chasing_ratio', 0):.3f}\n")
+            f.write(f"Monocular chasing ratio: {chasing_stats.get('mono_chasing_ratio', 0):.3f}\n")
+            f.write(f"Binocular chasing ratio: {chasing_stats.get('bino_chasing_ratio', 0):.3f}\n\n")
+            
             if self.use_instance_based:
                 f.write("INSTANCE-BASED TRANSITION PROBABILITIES:\n")
                 f.write("-" * 30 + "\n")
-                # f.write(f"P(Mono->Bino | Chasing Instance): {chasing_stats.get('prob_mono_to_bino_given_chasing', 0):.3f}\n")
                 f.write(f"P(Bino Appearance | Chasing Instance): {chasing_stats.get('prob_mono_to_bino_given_chasing', 0):.3f}\n")
+                f.write(f"P(Bino→Mono Transition | Chasing Instance): {chasing_stats.get('prob_bino_to_mono_given_chasing', 0):.3f}\n")
             else:
                 f.write("FRAME-BASED TRANSITION PROBABILITIES:\n")
                 f.write("-" * 30 + "\n")
-                f.write(f"P(Mono->Bino | Chasing Frame): {chasing_stats.get('prob_mono_to_bino_given_chasing', 0):.3f}\n")
+                f.write(f"P(Mono→Bino | Chasing Frame): {chasing_stats.get('prob_mono_to_bino_given_chasing', 0):.3f}\n")
+                f.write(f"P(Bino→Mono | Chasing Frame): {chasing_stats.get('prob_bino_to_mono_given_chasing', 0):.3f}\n")
             
-            f.write(f"P(Chasing | Mono->Bino Transition): {chasing_stats.get('prob_chasing_given_mono_to_bino', 0):.3f}\n")
+            f.write(f"\nP(Chasing | Mono→Bino Transition): {chasing_stats.get('prob_chasing_given_mono_to_bino', 0):.3f}\n")
+            f.write(f"P(Chasing | Bino→Mono Transition): {chasing_stats.get('prob_chasing_given_bino_to_mono', 0):.3f}\n")
+            
+            # Chi-square statistics
+            if 'chi2' in chasing_stats:
+                f.write("\nSTATISTICAL SIGNIFICANCE:\n")
+                f.write("-" * 30 + "\n")
+                f.write(f"Chi-square: χ²={chasing_stats['chi2']:.2f}\n")
+                f.write(f"P-value: {chasing_stats['p_value']:.2e}\n")
+                f.write(f"Cramér's V: {chasing_stats['cramers_v']:.3f}\n")
 
         print("Saved statistical summaries")
-    
-    def analyze_chasing_zones(self, data: pd.DataFrame, instance_data: Dict[str, List[Dict]]) -> None:
+            
+    def analyze_chasing_zones(self, data: pd.DataFrame, instance_data: Dict[str, List[Dict]]) -> Dict:
         print("Analyzing visual zones and transitions during chasing...")
         results = {
             'mono_chasing_ratio': 0, 'bino_chasing_ratio': 0, 'total_chasing_frames': 0,
-            'prob_mono_to_bino_given_chasing': 0, 'prob_chasing_given_mono_to_bino': 0
+            'prob_mono_to_bino_given_chasing': 0, 'prob_chasing_given_mono_to_bino': 0,
+            'prob_bino_to_mono_given_chasing': 0, 'prob_chasing_given_bino_to_mono': 0  # NEW
         }
+        
         if 'behavior' not in data.columns or 'zone' not in data.columns:
             print("Warning: 'behavior' or 'zone' not available for chasing analysis.")
             return results
@@ -899,83 +992,126 @@ class TrackingDataVisualizer:
         # --- Common setup for both methods ---
         data['simple_zone'] = data['zone'].replace({'right_monocular': 'monocular', 'left_monocular': 'monocular'})
         data['prev_simple_zone'] = data.groupby('file')['simple_zone'].shift(1)
+        
+        # Mono → Bino transitions
         mono_to_bino_mask = (data['prev_simple_zone'] == 'monocular') & (data['simple_zone'] == 'binocular')
         total_mono_to_bino_transitions = mono_to_bino_mask.sum()
         
+        # Bino → Mono transitions (NEW)
+        bino_to_mono_mask = (data['prev_simple_zone'] == 'binocular') & (data['simple_zone'] == 'monocular')
+        total_bino_to_mono_transitions = bino_to_mono_mask.sum()
+        
         chasing_data = data[data['behavior'] == 'chasing']
         results['total_chasing_frames'] = len(chasing_data)
+        
+        # --- Chi-square test ---
+        from scipy.stats import chi2_contingency
+        
+        chasing_zone_data = data.copy()
+        chasing_zone_data['is_chasing'] = (chasing_zone_data['behavior'] == 'chasing').astype(int)
+        contingency_table = pd.crosstab(chasing_zone_data['is_chasing'], chasing_zone_data['simple_zone'])
+        
+        chi2, p_value, dof, expected = chi2_contingency(contingency_table)
+        n = contingency_table.sum().sum()
+        cramers_v = np.sqrt(chi2 / (n * (min(contingency_table.shape) - 1)))
+        
+        results['chi2'] = chi2
+        results['p_value'] = p_value
+        results['cramers_v'] = cramers_v
 
         if self.use_instance_based:
             print("Analyzing transitions based on TRUE INSTANCES from Excel files...")
-            # --- TRUE INSTANCE-BASED LOGIC ---
             
             total_chasing_instances = 0
             num_chasing_instances_with_bino = 0
-            num_chasing_instances_with_transition = 0
-
-            # Iterate through each file's true instances
+            num_chasing_instances_with_bino_to_mono = 0  # NEW
+            
             for file_key, instances in instance_data.items():
                 if not instances:
                     continue
                 
-                # Filter main data to just this file
                 file_data = data[data['file'] == file_key]
                 
                 for instance in instances:
                     if instance['behavior'] == 'chasing':
                         total_chasing_instances += 1
                         
-                        # Get the frames for this specific instance
                         instance_frames = file_data[
                             (file_data['frame'] >= instance['start_frame']) &
                             (file_data['frame'] <= instance['end_frame'])
                         ]
                         
-                        # Check if a mono->bino transition exists within these frames
-                        transition_occurred = (
-                            (instance_frames['prev_simple_zone'] == 'monocular') &
-                            (instance_frames['simple_zone'] == 'binocular')
-                        ).any()
+                        # Check if binocular zone appears
                         bino_appeared = (instance_frames['simple_zone'] == 'binocular').any()
                         if bino_appeared:
                             num_chasing_instances_with_bino += 1
-
-                        if transition_occurred:
-                            num_chasing_instances_with_transition += 1
-
+                        
+                        # Check if bino→mono transition occurs (NEW)
+                        bino_to_mono_occurred = (
+                            (instance_frames['prev_simple_zone'] == 'binocular') &
+                            (instance_frames['simple_zone'] == 'monocular')
+                        ).any()
+                        
+                        if bino_to_mono_occurred:
+                            num_chasing_instances_with_bino_to_mono += 1
+            
+            # Calculate probabilities
             if total_chasing_instances > 0:
                 results['prob_mono_to_bino_given_chasing'] = num_chasing_instances_with_bino / total_chasing_instances
+                results['prob_bino_to_mono_given_chasing'] = num_chasing_instances_with_bino_to_mono / total_chasing_instances
             
-            chasing_at_transition = (data.loc[mono_to_bino_mask, 'behavior'] == 'chasing').sum()
+            # P(Chasing | Transition)
+            chasing_at_mono_to_bino = (data.loc[mono_to_bino_mask, 'behavior'] == 'chasing').sum()
             if total_mono_to_bino_transitions > 0:
-                results['prob_chasing_given_mono_to_bino'] = chasing_at_transition / total_mono_to_bino_transitions
+                results['prob_chasing_given_mono_to_bino'] = chasing_at_mono_to_bino / total_mono_to_bino_transitions
+            
+            chasing_at_bino_to_mono = (data.loc[bino_to_mono_mask, 'behavior'] == 'chasing').sum()
+            if total_bino_to_mono_transitions > 0:
+                results['prob_chasing_given_bino_to_mono'] = chasing_at_bino_to_mono / total_bino_to_mono_transitions
             
             print(f"  Total true chasing instances found: {total_chasing_instances}")
             print(f"  P(Bino Appearance | Chasing Instance): {results['prob_mono_to_bino_given_chasing']:.3f}")
+            print(f"  P(Bino→Mono Transition | Chasing Instance): {results['prob_bino_to_mono_given_chasing']:.3f}")
+            print(f"  P(Chasing | Bino→Mono Transition): {results['prob_chasing_given_bino_to_mono']:.3f}")
 
         else:
             print("Analyzing transitions based on FRAMES...")
-
-            # --- FRAME-BASED LOGIC ---
+            
             chasing_mono_to_bino_transitions = (mono_to_bino_mask & (data['behavior'] == 'chasing')).sum()
+            chasing_bino_to_mono_transitions = (bino_to_mono_mask & (data['behavior'] == 'chasing')).sum()
+            
             mono_frames_in_chasing = (chasing_data['simple_zone'] == 'monocular').sum()
-
+            bino_frames_in_chasing = (chasing_data['simple_zone'] == 'binocular').sum()
+            
             if mono_frames_in_chasing > 0:
                 results['prob_mono_to_bino_given_chasing'] = chasing_mono_to_bino_transitions / mono_frames_in_chasing
+            
+            if bino_frames_in_chasing > 0:
+                results['prob_bino_to_mono_given_chasing'] = chasing_bino_to_mono_transitions / bino_frames_in_chasing
             
             if total_mono_to_bino_transitions > 0:
                 results['prob_chasing_given_mono_to_bino'] = chasing_mono_to_bino_transitions / total_mono_to_bino_transitions
             
+            if total_bino_to_mono_transitions > 0:
+                results['prob_chasing_given_bino_to_mono'] = chasing_bino_to_mono_transitions / total_bino_to_mono_transitions
+            
             print(f"  Total monocular chasing frames: {mono_frames_in_chasing}")
-            print(f"  P(Mono->Bino | Chasing Frame): {results['prob_mono_to_bino_given_chasing']:.3f}")
+            print(f"  Total binocular chasing frames: {bino_frames_in_chasing}")
+            print(f"  P(Mono→Bino | Chasing Frame): {results['prob_mono_to_bino_given_chasing']:.3f}")
+            print(f"  P(Bino→Mono | Chasing Frame): {results['prob_bino_to_mono_given_chasing']:.3f}")
 
-        # --- Common calculations and cleanup ---
+        # Common calculations
         if results['total_chasing_frames'] > 0:
             zone_counts = chasing_data['zone'].value_counts()
             results['mono_chasing_ratio'] = (zone_counts.get('right_monocular', 0) + zone_counts.get('left_monocular', 0)) / results['total_chasing_frames']
             results['bino_chasing_ratio'] = zone_counts.get('binocular', 0) / results['total_chasing_frames']
         
-        print(f"  P(Chasing | Mono->Bino Transition): {results['prob_chasing_given_mono_to_bino']:.3f}")
+        print(f"  P(Chasing | Mono→Bino Transition): {results['prob_chasing_given_mono_to_bino']:.3f}")
+        print(f"  P(Chasing | Bino→Mono Transition): {results['prob_chasing_given_bino_to_mono']:.3f}")
+        
+        print("\nChasing & Binocular zone detailed statistics")
+        print(f"  Chi-square: χ²={chi2:.2f}, p={p_value:.2e}, Cramér's V={cramers_v:.3f}")
+        
         data.drop(columns=['simple_zone', 'prev_simple_zone'], inplace=True, errors='ignore')
         return results
     
@@ -1017,26 +1153,32 @@ class TrackingDataVisualizer:
         # Calculate statistics
         print("\n3. Calculating statistics...")
         stats = self.calculate_statistics(merged_data)
-        # --- ADD CHASING ANALYSIS ---
-        chasing_stats = self.analyze_chasing_zones(merged_data, instance_data)
         
+        print("\n4. Calculating attack-specific statistics...")
+        attack_behavior_stats = self.calculate_attack_statistics(merged_data)
+
+        print("\n5. Analyzing chasing zones and transitions...")
+        chasing_stats = self.analyze_chasing_zones(merged_data, instance_data)
+
         # Create visualizations
-        print("\n4. Creating histograms...")
+        print("\n6. Creating histograms...")
         self.plot_histograms(merged_data)
         
-        print("\n5. Creating zone distribution plots...")
+        print("\n7. Creating zone distribution plots...")
         self.plot_zone_distribution(merged_data)
-        
-        print("\n6. Creating correlation plot...")
+
+        print("\n8. Creating correlation plot...")
         corr_stats = self.plot_angle_speed_correlation(merged_data)
+        
+        print("\n9. Creating additional plots...")
         self.plot_binned_speed_vs_angle(merged_data)
         self.plot_relative_speed_by_behavior(merged_data)
         self.plot_zone_usage_by_behavior(merged_data)
         
         # Save summaries
-        print("\n7. Saving statistical summaries...")
-        self.save_statistics_summary(merged_data, stats, chasing_stats, corr_stats)
-
+        print("\n10. Saving statistical summaries...")
+        self.save_statistics_summary(merged_data, stats, chasing_stats, corr_stats, attack_behavior_stats)
+        
         print(f"\nAnalysis complete! Results saved to: {self.output_dir}")
 
 def main():
