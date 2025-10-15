@@ -204,10 +204,13 @@ if __name__ == "__main__":
     BATCH_SIZE = 64
     EPOCHS = 100
     LEARNING_RATE = 0.00025
-    MODEL_TYPE = 'gru' # Options: 'tcn', 'gru', 'lstm', 'lstm_att'
+    MODEL_TYPE = 'lstm' # Options: 'tcn', 'gru', 'lstm', 'lstm_att'
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     LOSS_FUNCTION = 'weighted_ce' # Options: 'weighted_ce', 'weighted_f1'
     USE_OVERSAMPLING = True # Set to True to enable oversampling
+    
+    # --- NEW: Feature type configuration ---
+    FEATURE_TYPE = 'raw'  # Options: 'raw' or 'engineered'
 
     print(f"Using device: {DEVICE}")
     print(f"Using model type: {MODEL_TYPE}")
@@ -220,39 +223,62 @@ if __name__ == "__main__":
     keypoint_dir = Path("SKH_FP/savgol_pose_w59p7")
     cricket_dir = Path("SKH_FP/FInalized_process/cricket_process_test5")
 
-    # Load raw data
-    raw_data_loader = RawDataLoader()
+    if FEATURE_TYPE == 'raw':
+        print("\n" + "="*60)
+        print("LOADING RAW POSE FEATURES")
+        print("="*60)
+        
+        # Load raw data
+        raw_data_loader = RawDataLoader()
 
-    # Find matching files
-    keypoint_files, cricket_files, label_files = raw_data_loader.find_matching_files(
-        keypoint_dir, cricket_dir, label_dir
-    )
+        # Find matching files
+        keypoint_files, cricket_files, label_files = raw_data_loader.find_matching_files(
+            keypoint_dir, cricket_dir, label_dir
+        )
+        
+        all_data = raw_data_loader.load_raw_data(keypoint_files, cricket_files, label_files, batch_size=5)
+        X, y, groups, feature_names = raw_data_loader.prepare_data(all_data)
+        
+        # Store the encoder for later use
+        target_encoder = raw_data_loader.target_encoder
+        
+        # Print some key features to verify we have the raw pose data
+        print(f"First 10 feature names: {feature_names[:10]}...")
+        print(f"Total raw features: {len(feature_names)}")
     
-    all_data = raw_data_loader.load_raw_data(keypoint_files, cricket_files, label_files, batch_size=5)
-    X, y, groups, feature_names = raw_data_loader.prepare_data(all_data)
+    elif FEATURE_TYPE == 'engineered':
+        print("\n" + "="*60)
+        print("LOADING ENGINEERED FEATURES")
+        print("="*60)
+        
+        # Find and pair files
+        feature_files, label_files = [], []
+        for feature_path in sorted(feature_dir.glob('*_analysis.csv')):
+            base_name = feature_path.stem.replace('_validated', '').replace('_analysis', '')
+            label_path = label_dir / f"{base_name}_processed_labels.csv"
+            if label_path.exists():
+                feature_files.append(str(feature_path))
+                label_files.append(str(label_path))
+
+        # Instantiate data processing tools
+        # Note: We don't need lag features for the sequence model
+        feature_engineer = MemoryOptimizedFeatureEngineer(sequential_lags=None)
+        data_preparator = MemoryOptimizedDataPreparator()
+
+        # Load and process data
+        all_data = data_preparator.process_files_in_batches(feature_files, label_files, batch_size=5)
+        X, y, groups = data_preparator.prepare_data(all_data, feature_engineer)
+        
+        # Store the encoder for later use
+        target_encoder = data_preparator.target_encoder
+        
+        print(f"Total engineered features: {X.shape[1]}")
     
-    # Print some key features to verify we have the raw pose data
-    print(f"First 10 feature names: {feature_names[:10]}...")
-    print(f"Total features: {len(feature_names)}")
-
-    # Find and pair files (same logic as before)
-    # feature_files, label_files = [], []
-    # for feature_path in sorted(feature_dir.glob('*_analysis.csv')):
-    #     base_name = feature_path.stem.replace('_validated', '').replace('_analysis', '')
-    #     label_path = label_dir / f"{base_name}_processed_labels.csv"
-    #     if label_path.exists():
-    #         feature_files.append(str(feature_path))
-    #         label_files.append(str(label_path))
-
-    # Instantiate data processing tools
-    # Note: We don't need lag features for the sequence model
-    # feature_engineer = MemoryOptimizedFeatureEngineer(sequential_lags=None)
-    # data_preparator = MemoryOptimizedDataPreparator()
-
-    # # Load and process data
-    # all_data = data_preparator.process_files_in_batches(feature_files, label_files, batch_size=5)
-    # X, y, groups = data_preparator.prepare_data(all_data, feature_engineer)
+    else:
+        raise ValueError("FEATURE_TYPE must be 'raw' or 'engineered'")
     
+    print(f"Total samples: {len(X)}")
+    print(f"Class distribution: {np.unique(y, return_counts=True)}")    
     # --- Create Datasets and DataLoaders ---
     # Split data by trials to prevent data leakage
     gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
@@ -306,7 +332,8 @@ if __name__ == "__main__":
     # train_sequence_labels = np.array(train_dataset.sequence_labels)
     # class_weights = compute_class_weight('balanced', classes=np.unique(train_sequence_labels), y=train_sequence_labels)
     # class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(DEVICE)
-    class_to_idx = {cls: i for i, cls in enumerate(raw_data_loader.target_encoder.classes_)}
+    # class_to_idx = {cls: i for i, cls in enumerate(raw_data_loader.target_encoder.classes_)}
+    class_to_idx = {cls: i for i, cls in enumerate(target_encoder.classes_)} 
     
     # Define custom weights. Higher values force the model to focus more on that class.
     # We are heavily penalizing mistakes on 'attack' and 'non_visual_rotation'.
@@ -325,10 +352,8 @@ if __name__ == "__main__":
     
     class_weights_tensor = class_weights.to(DEVICE)
     print(f"Using Manual Class Weights: {class_weights_tensor.cpu().numpy()}")
-    print(f"Corresponding to classes: {raw_data_loader.target_encoder.classes_}")
-
-    print(f"Calculated Class Weights: {class_weights_tensor.cpu().numpy()}")
-    
+    print(f"Corresponding to classes: {target_encoder.classes_}")  # CHANGED
+        
     if LOSS_FUNCTION == 'weighted_ce':
         criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     elif LOSS_FUNCTION == 'weighted_f1':
@@ -393,7 +418,9 @@ if __name__ == "__main__":
         
         val_loss /= len(val_loader)
         val_acc = correct / total
-        class_names = raw_data_loader.target_encoder.classes_
+        # class_names = raw_data_loader.target_encoder.classes_
+        class_names = target_encoder.classes_  # CHANGED
+
         try:
             # Get the index for the 'attack' class to calculate its specific F1 score
             attack_idx = list(class_names).index('attack')
@@ -408,23 +435,60 @@ if __name__ == "__main__":
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), 'best_model.pth')
+            model_save_path = f'best_{MODEL_TYPE}_{FEATURE_TYPE}_model.pth'  # CHANGED
+            torch.save(model.state_dict(), model_save_path)
+            print(f"Model saved to {model_save_path}")
             patience_counter = 0
         else:
             patience_counter += 1
-            if patience_counter >= 35: # Increased patience
+            if patience_counter >= 25: # Increased patience
                 print("Early stopping.")
                 break
     
     # --- Final Evaluation ---
-    print("\n--- Final Model Evaluation on Validation Set ---")
-    model.load_state_dict(torch.load('best_model.pth'))
+    print("\n" + "="*60)
+    print("FINAL MODEL EVALUATION ON VALIDATION SET")
+    print("="*60)
     
-    class_names = raw_data_loader.target_encoder.classes_
+    # Load the best model
+    model_save_path = f'best_{MODEL_TYPE}_{FEATURE_TYPE}_model.pth'
+    print(f"Loading best model from: {model_save_path}")
+    model.load_state_dict(torch.load(model_save_path))
+    model.eval()
+    
+    # Re-run validation with the best model
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for sequences, labels in val_loader:
+            sequences, labels = sequences.to(DEVICE), labels.to(DEVICE)
+            outputs = model(sequences)
+            _, predicted = torch.max(outputs.data, 1)
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    # Print detailed evaluation
+    class_names = target_encoder.classes_
+    print("\nClassification Report:")
     print(classification_report(all_labels, all_preds, target_names=class_names, zero_division=0))
     
+    # Calculate and print macro metrics
+    macro_f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    print(f"\nMacro F1 Score: {macro_f1:.4f}")
+    
+    # Generate confusion matrix
     cm = confusion_matrix(all_labels, all_preds)
     plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', xticklabels=class_names, yticklabels=class_names)
-    plt.title('Confusion Matrix (Validation Set)')
+    sns.heatmap(cm, annot=True, fmt='d', xticklabels=class_names, yticklabels=class_names, cmap='Blues')
+    plt.title(f'Confusion Matrix - {MODEL_TYPE.upper()} ({FEATURE_TYPE.capitalize()} Features)')
     plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.tight_layout()
+    
+    confusion_matrix_path = f'{MODEL_TYPE}_{FEATURE_TYPE}_confusion_matrix.png'
+    plt.savefig(confusion_matrix_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"\nConfusion matrix saved to: {confusion_matrix_path}")
+    
+    print("\n" + "="*60)
