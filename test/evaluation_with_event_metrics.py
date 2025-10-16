@@ -599,6 +599,58 @@ def plot_classification_metrics_bar(behavior_summaries: Dict, experiment_name: s
     plt.close(fig)
     
     print(f"Saved classification metrics bar chart to: {save_path}")
+def plot_feature_importance(model, feature_cols, top_n=20, save_dir=None, experiment_name=""):
+    """
+    Plot feature importance for tree-based models.
+    
+    Args:
+        model: Trained model with feature_importances_ attribute
+        feature_cols: List of feature column names
+        top_n: Number of top features to display
+        save_dir: Directory to save the plot
+        experiment_name: Name for the plot file
+    """
+    if not hasattr(model, 'feature_importances_'):
+        print("Model does not have feature_importances_ attribute")
+        return None
+    
+    # Create importance dataframe
+    importance_df = pd.DataFrame({
+        'feature': feature_cols,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    # Get top N features
+    top_features = importance_df.head(top_n)
+    
+    # Create plot
+    plt.figure(figsize=(12, 8))
+    sns.barplot(data=top_features, x='importance', y='feature', palette='viridis')
+    plt.title(f'Top {top_n} Feature Importances - {experiment_name}')
+    plt.xlabel('Importance Score')
+    plt.ylabel('Feature')
+    plt.tight_layout()
+    
+    # Save if directory provided
+    if save_dir:
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / f"feature_importance_{experiment_name.replace(' ', '_')}.png"
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved feature importance plot to: {save_path}")
+    
+    plt.show()
+    
+    # Print top features
+    print(f"\n{'='*60}")
+    print(f"TOP {top_n} FEATURE IMPORTANCES - {experiment_name}")
+    print('='*60)
+    print(f"{'Rank':<6} {'Feature':<40} {'Importance':>12}")
+    print("-"*60)
+    for idx, row in enumerate(top_features.itertuples(), 1):
+        print(f"{idx:<6} {row.feature:<40} {row.importance:>12.6f}")
+    
+    return importance_df
 
 def run_experiment(feature_files: List[str], label_files: List[str], 
                   experiment_name: str = "Experiment",
@@ -698,6 +750,7 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     detailed_fold_results = []
     all_y_test_agg = []
     all_y_pred_agg = []
+    final_model = None
 
     print(f"\nRunning 4-fold cross-validation...")
 
@@ -808,7 +861,10 @@ def run_experiment(feature_files: List[str], label_files: List[str],
                 eval_metric='mlogloss'
             )
             model.fit(X_train_scaled, y_train, sample_weight=class_weights)
-        
+        # Store the final fold's model for feature importance
+        if fold == len(cv_splits) - 1:
+            final_model = model
+
         if use_thresholding:
             print("Predicting with custom threshold to balance precision/recall...")
             # 1. Get class probabilities instead of direct predictions
@@ -980,12 +1036,26 @@ def run_experiment(feature_files: List[str], label_files: List[str],
     save_dir = Path("/home/tarislada/Documents/Extra_python_projects/SKH FP/FInalized_process/prediction_plots/metrics_plots")
     plot_classification_metrics_bar(behavior_summaries, experiment_name, save_dir)
     
+    if final_model is not None:
+        feature_importance_df = plot_feature_importance(
+            final_model, 
+            feature_cols, 
+            top_n=30,
+            save_dir=save_dir,
+            experiment_name=experiment_name
+        )
+        print(f"Feature importance analysis complete. Saved at {save_dir} directory.")
+    else:
+        feature_importance_df = None
+        print("Warning: No model available for feature importance analysis")
+
     return {
         'cv_frame_f1_mean': cv_frame_f1_mean,
         'cv_frame_f1_std': cv_frame_f1_std,
         'behavior_summaries': behavior_summaries,
         'detailed_folds': detailed_fold_results,
-        'feature_cols': feature_cols
+        'feature_cols': feature_cols,
+        'feature_importance': feature_importance_df  # NEW: Add to return dict
     }
 
 if __name__ == "__main__":
