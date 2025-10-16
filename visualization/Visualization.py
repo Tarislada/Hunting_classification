@@ -358,37 +358,90 @@ class TrackingDataVisualizer:
         
         return cricket_in_frame, cricket_out_frame
 
-    def calculate_attack_statistics(self, data: pd.DataFrame) -> Dict:
+    def calculate_behavior_statistics(self, data: pd.DataFrame, behavior_name: str) -> Dict:
         """
-        Calculate average statistics specifically during attack behavior.
+        Calculate average statistics during a specific behavior, grouped by animal.
+        
+        Args:
+            data: DataFrame containing tracking data
+            behavior_name: Name of the behavior to analyze (e.g., 'attack', 'chasing', 'consume')
         
         Returns:
-            Dictionary containing mean, median, std for key metrics during attack
+            Dictionary containing per-animal stats and overall aggregate stats
         """
-        print("Calculating statistics during attack behavior...")
-        
+        print(f"Calculating statistics during {behavior_name} behavior (per animal)...")
+
         if 'behavior' not in data.columns:
             print("Warning: 'behavior' column not found.")
             return {}
         
-        attack_data = data[data['behavior'] == 'attack']
-        
-        if attack_data.empty:
-            print("Warning: No attack frames found in data.")
+        if 'file' not in data.columns:
+            print("Warning: 'file' column not found - cannot group by animal.")
             return {}
         
-        metrics = ['distance', 'cricket_angle', 'head_angle', 'speed', 'mouse_speed']
-        attack_stats = {}
+        behavior_data = data[data['behavior'] == behavior_name].copy()
         
-        print(f"\nAttack behavior statistics (n={len(attack_data)} frames):")
+        if behavior_data.empty:
+            print(f"Warning: No {behavior_name} frames found in data.")
+            return {}
+        
+        # Extract animal ID from file name (e.g., 'm14_t1' -> 'm14')
+        behavior_data['animal_id'] = behavior_data['file'].str.extract(r'(m\d+)')[0]
+        
+        metrics = ['distance', 'cricket_angle', 'head_angle', 'speed', 'mouse_speed']
+        
+        # Dictionary to store results
+        behavior_stats = {
+            'per_animal': {},  # Individual animal statistics
+            'aggregate': {},   # Overall statistics across all animals
+            'behavior_name': behavior_name  # Store behavior name for reference
+        }
+        
+        print(f"\n{behavior_name.capitalize()} behavior statistics (n={len(behavior_data)} total frames):")
+        print("=" * 60)
+        
+        # --- Calculate per-animal statistics ---
+        unique_animals = behavior_data['animal_id'].dropna().unique()
+        
+        for animal_id in sorted(unique_animals):
+            animal_behavior_data = behavior_data[behavior_data['animal_id'] == animal_id]
+            behavior_stats['per_animal'][animal_id] = {}
+            
+            print(f"\n{animal_id.upper()} (n={len(animal_behavior_data)} frames):")
+            print("-" * 50)
+            
+            for metric in metrics:
+                if metric in animal_behavior_data.columns:
+                    valid_data = animal_behavior_data[metric].dropna()
+                    
+                    if len(valid_data) > 0:
+                        behavior_stats['per_animal'][animal_id][metric] = {
+                            'count': len(valid_data),
+                            'mean': valid_data.mean(),
+                            'median': valid_data.median(),
+                            'std': valid_data.std(),
+                            'min': valid_data.min(),
+                            'max': valid_data.max(),
+                            'q25': valid_data.quantile(0.25),
+                            'q75': valid_data.quantile(0.75)
+                        }
+                        
+                        print(f"  {metric}:")
+                        print(f"    Mean: {behavior_stats['per_animal'][animal_id][metric]['mean']:.2f}")
+                        print(f"    Median: {behavior_stats['per_animal'][animal_id][metric]['median']:.2f}")
+                        print(f"    Std: {behavior_stats['per_animal'][animal_id][metric]['std']:.2f}")
+        
+        # --- Calculate aggregate statistics (all animals combined) ---
+        print(f"\n{'='*60}")
+        print("AGGREGATE STATISTICS (All Animals Combined):")
         print("-" * 50)
         
         for metric in metrics:
-            if metric in attack_data.columns:
-                valid_data = attack_data[metric].dropna()
+            if metric in behavior_data.columns:
+                valid_data = behavior_data[metric].dropna()
                 
                 if len(valid_data) > 0:
-                    attack_stats[metric] = {
+                    behavior_stats['aggregate'][metric] = {
                         'count': len(valid_data),
                         'mean': valid_data.mean(),
                         'median': valid_data.median(),
@@ -400,13 +453,38 @@ class TrackingDataVisualizer:
                     }
                     
                     print(f"{metric}:")
-                    print(f"  Mean: {attack_stats[metric]['mean']:.2f}")
-                    print(f"  Median: {attack_stats[metric]['median']:.2f}")
-                    print(f"  Std: {attack_stats[metric]['std']:.2f}")
-                    print(f"  Range: [{attack_stats[metric]['min']:.2f}, {attack_stats[metric]['max']:.2f}]")
+                    print(f"  Mean: {behavior_stats['aggregate'][metric]['mean']:.2f}")
+                    print(f"  Median: {behavior_stats['aggregate'][metric]['median']:.2f}")
+                    print(f"  Std: {behavior_stats['aggregate'][metric]['std']:.2f}")
+                    print(f"  Range: [{behavior_stats['aggregate'][metric]['min']:.2f}, {behavior_stats['aggregate'][metric]['max']:.2f}]")
         
-        return attack_stats
+        # --- Calculate per-animal means (useful for reporting) ---
+        print(f"\n{'='*60}")
+        print("PER-ANIMAL MEANS (for cross-animal comparison):")
+        print("-" * 50)
         
+        behavior_stats['animal_means'] = {}
+        
+        for metric in metrics:
+            animal_means = []
+            for animal_id in sorted(unique_animals):
+                if metric in behavior_stats['per_animal'].get(animal_id, {}):
+                    animal_means.append(behavior_stats['per_animal'][animal_id][metric]['mean'])
+            
+            if animal_means:
+                behavior_stats['animal_means'][metric] = {
+                    'mean_of_means': np.mean(animal_means),
+                    'std_of_means': np.std(animal_means),
+                    'n_animals': len(animal_means),
+                    'individual_means': animal_means
+                }
+                
+                print(f"{metric}:")
+                print(f"  Mean across animals: {behavior_stats['animal_means'][metric]['mean_of_means']:.2f} ± {behavior_stats['animal_means'][metric]['std_of_means']:.2f}")
+                print(f"  (n={len(animal_means)} animals)")
+        
+        return behavior_stats
+            
     def plot_histograms(self, data: pd.DataFrame, save_individual: bool = True) -> None:
         """Create histogram plots for each metric."""
         metrics_config = {
@@ -610,54 +688,201 @@ class TrackingDataVisualizer:
         return all_corr_stats
 
     def plot_binned_speed_vs_angle(self, data: pd.DataFrame) -> None:
-        """Plot mouse speed as a bar plot binned by head angle."""
+        """Plot mouse speed as a bar plot binned by head angle - both aggregate and per-animal."""
         print("Plotting binned speed vs. angle...")
         if 'head_angle' not in data.columns or 'mouse_speed' not in data.columns:
             print("Warning: 'head_angle' or 'mouse_speed' not available for binned plot.")
             return
+        
+        if 'file' not in data.columns:
+            print("Warning: 'file' column not found - cannot group by animal.")
+            return
 
-        plot_data = data[['head_angle', 'mouse_speed']].dropna().copy()
+        plot_data = data[['head_angle', 'mouse_speed', 'file']].dropna().copy()
         plot_data['abs_head_angle'] = plot_data['head_angle'].abs()
+        
+        # Extract animal ID
+        plot_data['animal_id'] = plot_data['file'].str.extract(r'(m\d+)')[0]
 
         # Define bins for the absolute head angle
         bins = [0, 15, 30, 45, 60, 90, 180]
         labels = ['0-15°', '15-30°', '30-45°', '45-60°', '60-90°', '>90°']
         plot_data['angle_bin'] = pd.cut(plot_data['abs_head_angle'], bins=bins, labels=labels, right=False)
 
-        # Calculate mean, std deviation, and count for speed in each bin
-        bin_stats = plot_data.groupby('angle_bin')['mouse_speed'].agg(['mean', 'std', 'count']).reset_index()
+        # --- 1. AGGREGATE PLOT (All Animals Combined) ---
+        print("  Creating aggregate plot...")
+        bin_stats_agg = plot_data.groupby('angle_bin')['mouse_speed'].agg(['mean', 'std', 'count']).reset_index()
 
-        if bin_stats.empty or bin_stats['count'].sum() == 0:
-            print("No data to plot for binned speed vs. angle.")
+        if not bin_stats_agg.empty and bin_stats_agg['count'].sum() > 0:
+            plt.figure(figsize=(12, 7))
+            ax = sns.barplot(data=bin_stats_agg, x='angle_bin', y='mean', color='mediumseagreen')
+            
+            # Add error bars
+            plt.errorbar(x=bin_stats_agg.index, y=bin_stats_agg['mean'], yerr=bin_stats_agg['std'], 
+                        fmt='none', c='black', capsize=5)
+            
+            ax.set_title('Mean Mouse Speed by Head Angle Range (All Animals)', fontsize=16, weight='bold')
+            ax.set_xlabel('Absolute Head Angle Range', fontsize=14)
+            ax.set_ylabel('Mean Mouse Speed (pixels/frame)', fontsize=14)
+            ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+            # Add count labels on top of bars
+            for i, p in enumerate(ax.patches):
+                count = bin_stats_agg.loc[i, 'count']
+                ax.annotate(f'n={int(count)}', 
+                           (p.get_x() + p.get_width() / 2., p.get_height()), 
+                           ha='center', va='center', 
+                           xytext=(0, 15), 
+                           textcoords='offset points',
+                           color='black', fontsize=11)
+
+            plt.tight_layout()
+            plt.savefig(self.output_dir / 'binned_speed_vs_angle_aggregate.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            print("  Saved aggregate binned speed vs. angle plot.")
+        else:
+            print("  No data to plot for aggregate.")
+
+        # --- 2. PER-ANIMAL PLOTS ---
+        print("  Creating per-animal plots...")
+        unique_animals = plot_data['animal_id'].dropna().unique()
+        
+        if len(unique_animals) == 0:
+            print("  No animal IDs found.")
             return
-
-        # Create the bar plot
-        plt.figure(figsize=(12, 7))
-        ax = sns.barplot(data=bin_stats, x='angle_bin', y='mean', color='mediumseagreen')
         
-        # Add error bars
-        plt.errorbar(x=bin_stats.index, y=bin_stats['mean'], yerr=bin_stats['std'], fmt='none', c='black', capsize=5)
+        # Create subplots for all animals
+        n_animals = len(unique_animals)
+        ncols = min(3, n_animals)  # Max 3 columns
+        nrows = int(np.ceil(n_animals / ncols))
         
-        ax.set_title('Mean Mouse Speed by Head Angle Range')
-        ax.set_xlabel('Absolute Head Angle Range')
-        ax.set_ylabel('Mean Mouse Speed (pixels/frame)')
-        ax.grid(axis='y', linestyle='--', alpha=0.7)
-
-        # Add count labels on top of bars
-        for i, p in enumerate(ax.patches):
-            count = bin_stats.loc[i, 'count']
-            ax.annotate(f'n={int(count)}', 
-                        (p.get_x() + p.get_width() / 2., p.get_height()), 
-                        ha='center', va='center', 
-                        xytext=(0, 15), 
-                        textcoords='offset points',
-                        color='black')
-
+        fig, axes = plt.subplots(nrows, ncols, figsize=(6*ncols, 5*nrows))
+        if n_animals == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
+        
+        # Color palette for animals
+        animal_colors = sns.color_palette("Set2", n_animals)
+        
+        for idx, animal_id in enumerate(sorted(unique_animals)):
+            animal_data = plot_data[plot_data['animal_id'] == animal_id]
+            bin_stats = animal_data.groupby('angle_bin')['mouse_speed'].agg(['mean', 'std', 'count']).reset_index()
+            
+            if bin_stats.empty or bin_stats['count'].sum() == 0:
+                axes[idx].text(0.5, 0.5, f'{animal_id.upper()}\nNo data', 
+                              ha='center', va='center', transform=axes[idx].transAxes)
+                continue
+            
+            # Create bar plot
+            ax = axes[idx]
+            bars = ax.bar(bin_stats.index, bin_stats['mean'], color=animal_colors[idx], alpha=0.7, edgecolor='black')
+            
+            # Add error bars
+            ax.errorbar(bin_stats.index, bin_stats['mean'], yerr=bin_stats['std'], 
+                       fmt='none', c='black', capsize=4, linewidth=1.5)
+            
+            # Formatting
+            ax.set_title(f'{animal_id.upper()} (n={len(animal_data)} frames)', fontsize=13, weight='bold')
+            ax.set_xlabel('Absolute Head Angle Range', fontsize=11)
+            ax.set_ylabel('Mean Speed (pixels/frame)', fontsize=11)
+            ax.set_xticks(bin_stats.index)
+            ax.set_xticklabels(bin_stats['angle_bin'], rotation=45, ha='right')
+            ax.grid(axis='y', linestyle='--', alpha=0.5)
+            
+            # Add count labels
+            for i, (bar, count) in enumerate(zip(bars, bin_stats['count'])):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'n={int(count)}',
+                       ha='center', va='bottom', fontsize=9)
+            
+            print(f"    Plotted {animal_id}: {len(animal_data)} frames")
+        
+        # Hide unused subplots
+        for idx in range(n_animals, len(axes)):
+            axes[idx].set_visible(False)
+        
+        fig.suptitle('Mean Mouse Speed by Head Angle Range (Per Animal)', 
+                    fontsize=16, weight='bold', y=0.995)
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'binned_speed_vs_angle.png', dpi=300, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'binned_speed_vs_angle_per_animal.png', dpi=300, bbox_inches='tight')
         plt.close()
-        print("Saved binned speed vs. angle plot.")
-
+        print("  Saved per-animal binned speed vs. angle plot.")
+        
+        # --- 3. MEAN ACROSS ANIMALS WITH ERROR BARS ---
+        print("  Creating mean across animals plot with error bars...")
+        
+        # Calculate mean speed for each animal in each bin
+        animal_bin_means = plot_data.groupby(['animal_id', 'angle_bin'])['mouse_speed'].mean().reset_index()
+        
+        # Calculate statistics across animals for each bin
+        bin_stats_across_animals = animal_bin_means.groupby('angle_bin')['mouse_speed'].agg([
+            ('mean', 'mean'),
+            ('sem', lambda x: np.std(x, ddof=1) / np.sqrt(len(x))),  # Standard error of the mean
+            ('std', 'std'),
+            ('count', 'count')
+        ]).reset_index()
+        
+        # Create the plot
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        x_pos = np.arange(len(bin_stats_across_animals))
+        
+        # Bar plot with error bars
+        bars = ax.bar(x_pos, bin_stats_across_animals['mean'], 
+                     color='#4CAF50', alpha=0.7, edgecolor='black', linewidth=1.5)
+        
+        # Add error bars (SEM)
+        ax.errorbar(x_pos, bin_stats_across_animals['mean'], 
+                   yerr=bin_stats_across_animals['sem'],
+                   fmt='none', c='black', capsize=8, capthick=2, linewidth=2)
+        
+        # Formatting
+        ax.set_title('Mean Mouse Speed by Head Angle Range (Across Animals)', 
+                    fontsize=18, weight='bold', pad=20)
+        ax.set_xlabel('Absolute Head Angle Range', fontsize=15, weight='bold')
+        ax.set_ylabel('Mean Mouse Speed (pixels/frame)', fontsize=15, weight='bold')
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(bin_stats_across_animals['angle_bin'], fontsize=12)
+        ax.grid(axis='y', linestyle='--', alpha=0.5)
+        
+        # Add n= labels on bars
+        for i, (bar, row) in enumerate(zip(bars, bin_stats_across_animals.itertuples())):
+            height = bar.get_height()
+            n_animals = int(row.count)
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'n={n_animals}',
+                   ha='center', va='bottom', fontsize=11, weight='bold')
+        
+        # Add statistical annotation
+        stats_text = (f"Error bars: ±SEM (Standard Error of Mean)\n"
+                     f"Each bar represents mean across {len(unique_animals)} animals")
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+               verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / 'binned_speed_vs_angle_mean_across_animals.png', 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print("  Saved mean across animals plot with error bars.")
+        
+        # --- 4. PRINT DETAILED STATISTICS TABLE ---
+        print("\n  Per-bin statistics across animals:")
+        print("  " + "="*70)
+        print(f"  {'Angle Bin':<15} {'Mean':<12} {'SEM':<12} {'STD':<12} {'N':<5}")
+        print("  " + "-"*70)
+        for row in bin_stats_across_animals.itertuples():
+            print(f"  {row.angle_bin:<15} {row.mean:<12.3f} {row.sem:<12.3f} {row.std:<12.3f} {int(row.count):<5}")
+        print("  " + "="*70)
+        
+        # --- 5. SAVE STATISTICS TO CSV ---
+        bin_stats_across_animals.to_csv(
+            self.output_dir / 'binned_speed_statistics_across_animals.csv', 
+            index=False
+        )
+        print("  Saved bin statistics to CSV.")
+        
     def plot_relative_speed_by_behavior(self, data: pd.DataFrame) -> None:
         """Plot the mouse-cricket relative speed for different behaviors using a hybrid violin/strip plot."""
         print("Plotting relative speed by behavior...")
@@ -882,47 +1107,101 @@ class TrackingDataVisualizer:
         print("Saved zone usage pie charts.")
 
     def save_statistics_summary(self, data: pd.DataFrame, stats: Dict, chasing_stats: Dict, 
-                                corr_stats: Optional[Dict], attack_behavior_stats: Dict) -> None:  # NEW PARAMETER
+                                corr_stats: Optional[Dict], 
+                                attack_stats: Dict, 
+                                chasing_behavior_stats: Dict,
+                                consume_stats: Dict) -> None:
         """Save statistical summary to CSV and text files."""
         # Create summary DataFrame
         summary_df = pd.DataFrame(stats).T
         summary_df.to_csv(self.output_dir / 'statistics_summary.csv')
         
-        if attack_behavior_stats:
-            attack_summary_df = pd.DataFrame(attack_behavior_stats).T
-            attack_summary_df.to_csv(self.output_dir / 'attack_statistics_summary.csv')
+        # Save per-behavior statistics
+        behavior_stats_dict = {
+            'attack': attack_stats,
+            'chasing': chasing_behavior_stats,
+            'consume': consume_stats
+        }
+        
+        for behavior_name, behavior_stats in behavior_stats_dict.items():
+            if behavior_stats:
+                # Save aggregate statistics
+                if 'aggregate' in behavior_stats:
+                    aggregate_df = pd.DataFrame(behavior_stats['aggregate']).T
+                    aggregate_df.to_csv(self.output_dir / f'{behavior_name}_statistics_aggregate.csv')
+                
+                # Save per-animal statistics
+                if 'per_animal' in behavior_stats:
+                    per_animal_dfs = []
+                    for animal_id, animal_stats in behavior_stats['per_animal'].items():
+                        animal_df = pd.DataFrame(animal_stats).T
+                        animal_df['animal_id'] = animal_id
+                        per_animal_dfs.append(animal_df)
                     
+                    if per_animal_dfs:
+                        all_animals_df = pd.concat(per_animal_dfs)
+                        all_animals_df.to_csv(self.output_dir / f'{behavior_name}_statistics_per_animal.csv')
+                
+                # Save animal means
+                if 'animal_means' in behavior_stats:
+                    animal_means_df = pd.DataFrame(behavior_stats['animal_means']).T
+                    animal_means_df.to_csv(self.output_dir / f'{behavior_name}_statistics_animal_means.csv')
+                                    
         # Create detailed text report
         with open(self.output_dir / 'data_summary_report.txt', 'w') as f:
             f.write("ANIMAL TRACKING DATA ANALYSIS REPORT\n")
-            f.write("=" * 50 + "\n\n")
+            f.write("=" * 80 + "\n\n")
             
             f.write(f"Total frames analyzed: {len(data)}\n")
             f.write(f"Unique files: {data['file'].nunique() if 'file' in data.columns else 'N/A'}\n\n")
             
             # Overall statistics
             f.write("OVERALL STATISTICS:\n")
-            f.write("=" * 50 + "\n")
+            f.write("=" * 80 + "\n")
             for metric, metric_stats in stats.items():
                 f.write(f"\n{metric.upper().replace('_', ' ')}:\n")
                 f.write("-" * 30 + "\n")
                 for stat_name, value in metric_stats.items():
                     f.write(f"{stat_name.capitalize()}: {value:.3f}\n")
             
-            # Chasing-specific statistics
-            if attack_behavior_stats:
-                f.write("\n\n")
-                f.write("STATISTICS DURING ATTACK BEHAVIOR:\n")
-                f.write("=" * 50 + "\n")
-                for metric, metric_stats in attack_behavior_stats.items():
-                    f.write(f"\n{metric.upper().replace('_', ' ')} (Attack Only):\n")
-                    f.write("-" * 30 + "\n")
-                    for stat_name, value in metric_stats.items():
-                        if stat_name != 'count':
-                            f.write(f"{stat_name.capitalize()}: {value:.3f}\n")
-                        else:
-                            f.write(f"{stat_name.capitalize()}: {value}\n")
-                            
+            # Per-behavior statistics
+            for behavior_name, behavior_stats in behavior_stats_dict.items():
+                if behavior_stats:
+                    f.write("\n\n")
+                    f.write(f"STATISTICS DURING {behavior_name.upper()} BEHAVIOR:\n")
+                    f.write("=" * 80 + "\n")
+                    
+                    # Aggregate statistics
+                    if 'aggregate' in behavior_stats:
+                        f.write("\nAGGREGATE (All Animals Combined):\n")
+                        f.write("-" * 30 + "\n")
+                        for metric, metric_stats in behavior_stats['aggregate'].items():
+                            f.write(f"\n{metric.upper().replace('_', ' ')}:\n")
+                            for stat_name, value in metric_stats.items():
+                                if stat_name != 'count':
+                                    f.write(f"  {stat_name.capitalize()}: {value:.3f}\n")
+                                else:
+                                    f.write(f"  {stat_name.capitalize()}: {value}\n")
+                    
+                    # Per-animal statistics
+                    if 'per_animal' in behavior_stats:
+                        f.write("\n\nPER-ANIMAL BREAKDOWN:\n")
+                        f.write("-" * 30 + "\n")
+                        for animal_id in sorted(behavior_stats['per_animal'].keys()):
+                            f.write(f"\n{animal_id.upper()}:\n")
+                            for metric, metric_stats in behavior_stats['per_animal'][animal_id].items():
+                                f.write(f"  {metric}: Mean={metric_stats['mean']:.2f}, ")
+                                f.write(f"Median={metric_stats['median']:.2f}, ")
+                                f.write(f"Std={metric_stats['std']:.2f}\n")
+                    
+                    # Animal means (for cross-animal comparison)
+                    if 'animal_means' in behavior_stats:
+                        f.write("\n\nCROSS-ANIMAL MEANS:\n")
+                        f.write("-" * 30 + "\n")
+                        for metric, means_stats in behavior_stats['animal_means'].items():
+                            f.write(f"{metric}: {means_stats['mean_of_means']:.2f} ± {means_stats['std_of_means']:.2f} ")
+                            f.write(f"(n={means_stats['n_animals']} animals)\n")
+                                                    
             # Correlation statistics
             if corr_stats:
                 f.write("\n\nHEAD ANGLE VS SPEED CORRELATION:\n")
@@ -946,26 +1225,42 @@ class TrackingDataVisualizer:
                     percentage = (count / total_zones) * 100
                     f.write(f"{zone}: {count} ({percentage:.1f}%)\n")
 
-            # Chasing zone analysis
-            f.write("\n\nCHASING ZONE ANALYSIS:\n")
-            f.write("=" * 50 + "\n")
+            # Chasing zone analysis (instance-based)
+            f.write("\n\nCHASING & ATTACK ZONE ANALYSIS:\n")
+            f.write("=" * 80 + "\n")
             f.write(f"Total chasing frames: {chasing_stats.get('total_chasing_frames', 0)}\n")
             f.write(f"Monocular chasing ratio: {chasing_stats.get('mono_chasing_ratio', 0):.3f}\n")
             f.write(f"Binocular chasing ratio: {chasing_stats.get('bino_chasing_ratio', 0):.3f}\n\n")
             
             if self.use_instance_based:
-                f.write("INSTANCE-BASED TRANSITION PROBABILITIES:\n")
+                f.write("INSTANCE-BASED ANALYSIS:\n")
                 f.write("-" * 30 + "\n")
-                f.write(f"P(Bino Appearance | Chasing Instance): {chasing_stats.get('prob_mono_to_bino_given_chasing', 0):.3f}\n")
-                f.write(f"P(Bino→Mono Transition | Chasing Instance): {chasing_stats.get('prob_bino_to_mono_given_chasing', 0):.3f}\n")
+                f.write("\nChasing Instances:\n")
+                f.write(f"  P(Bino Appearance | Chasing Instance): {chasing_stats.get('prob_mono_to_bino_given_chasing', 0):.3f}\n")
+                f.write(f"  P(Bino→Mono Transition | Chasing Instance): {chasing_stats.get('prob_bino_to_mono_given_chasing', 0):.3f}\n")
+                
+                f.write("\nAttack Instances:\n")
+                f.write(f"  Total attack instances: {chasing_stats.get('total_attack_instances', 0)}\n")
+                f.write(f"  Attack instances with Bino→Mono: {chasing_stats.get('attack_instances_with_bino_to_mono', 0)}\n")
+                f.write(f"  P(Bino→Mono Transition | Attack Instance): {chasing_stats.get('prob_bino_to_mono_given_attack', 0):.3f}\n")
+                
+                # NEW: Attack categorization
+                f.write("\nAttack Categorization:\n")
+                f.write(f"  Pure Binocular Attacks: {chasing_stats.get('pure_bino_attacks', 0)} ({chasing_stats.get('ratio_pure_bino_attacks', 0):.1%})\n")
+                f.write(f"  Pure Monocular Attacks: {chasing_stats.get('pure_mono_attacks', 0)} ({chasing_stats.get('ratio_pure_mono_attacks', 0):.1%})\n")
+                f.write(f"  Mixed Attacks: {chasing_stats.get('mixed_attacks', 0)} ({chasing_stats.get('ratio_mixed_attacks', 0):.1%})\n")
             else:
-                f.write("FRAME-BASED TRANSITION PROBABILITIES:\n")
+                f.write("FRAME-BASED ANALYSIS:\n")
                 f.write("-" * 30 + "\n")
-                f.write(f"P(Mono→Bino | Chasing Frame): {chasing_stats.get('prob_mono_to_bino_given_chasing', 0):.3f}\n")
-                f.write(f"P(Bino→Mono | Chasing Frame): {chasing_stats.get('prob_bino_to_mono_given_chasing', 0):.3f}\n")
+                f.write(f"  P(Mono→Bino | Chasing Frame): {chasing_stats.get('prob_mono_to_bino_given_chasing', 0):.3f}\n")
+                f.write(f"  P(Bino→Mono | Chasing Frame): {chasing_stats.get('prob_bino_to_mono_given_chasing', 0):.3f}\n")
+                f.write(f"  P(Bino→Mono | Attack Frame): {chasing_stats.get('prob_bino_to_mono_given_attack', 0):.3f}\n")
             
-            f.write(f"\nP(Chasing | Mono→Bino Transition): {chasing_stats.get('prob_chasing_given_mono_to_bino', 0):.3f}\n")
+            f.write("\nTRANSITION PROBABILITIES:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"P(Chasing | Mono→Bino Transition): {chasing_stats.get('prob_chasing_given_mono_to_bino', 0):.3f}\n")
             f.write(f"P(Chasing | Bino→Mono Transition): {chasing_stats.get('prob_chasing_given_bino_to_mono', 0):.3f}\n")
+            f.write(f"P(Attack | Bino→Mono Transition): {chasing_stats.get('prob_attack_given_bino_to_mono', 0):.3f}\n")
             
             # Chi-square statistics
             if 'chi2' in chasing_stats:
@@ -974,19 +1269,21 @@ class TrackingDataVisualizer:
                 f.write(f"Chi-square: χ²={chasing_stats['chi2']:.2f}\n")
                 f.write(f"P-value: {chasing_stats['p_value']:.2e}\n")
                 f.write(f"Cramér's V: {chasing_stats['cramers_v']:.3f}\n")
-
         print("Saved statistical summaries")
-            
+                    
     def analyze_chasing_zones(self, data: pd.DataFrame, instance_data: Dict[str, List[Dict]]) -> Dict:
-        print("Analyzing visual zones and transitions during chasing...")
+        print("Analyzing visual zones and transitions during chasing and attack...")
         results = {
             'mono_chasing_ratio': 0, 'bino_chasing_ratio': 0, 'total_chasing_frames': 0,
             'prob_mono_to_bino_given_chasing': 0, 'prob_chasing_given_mono_to_bino': 0,
-            'prob_bino_to_mono_given_chasing': 0, 'prob_chasing_given_bino_to_mono': 0  # NEW
+            'prob_bino_to_mono_given_chasing': 0, 'prob_chasing_given_bino_to_mono': 0,
+            # NEW: Attack-related probabilities
+            'prob_bino_to_mono_given_attack': 0, 'prob_attack_given_bino_to_mono': 0,
+            'total_attack_instances': 0, 'attack_instances_with_bino_to_mono': 0
         }
         
         if 'behavior' not in data.columns or 'zone' not in data.columns:
-            print("Warning: 'behavior' or 'zone' not available for chasing analysis.")
+            print("Warning: 'behavior' or 'zone' not available for analysis.")
             return results
 
         # --- Common setup for both methods ---
@@ -997,11 +1294,12 @@ class TrackingDataVisualizer:
         mono_to_bino_mask = (data['prev_simple_zone'] == 'monocular') & (data['simple_zone'] == 'binocular')
         total_mono_to_bino_transitions = mono_to_bino_mask.sum()
         
-        # Bino → Mono transitions (NEW)
+        # Bino → Mono transitions
         bino_to_mono_mask = (data['prev_simple_zone'] == 'binocular') & (data['simple_zone'] == 'monocular')
         total_bino_to_mono_transitions = bino_to_mono_mask.sum()
         
         chasing_data = data[data['behavior'] == 'chasing']
+        attack_data = data[data['behavior'] == 'attack']
         results['total_chasing_frames'] = len(chasing_data)
         
         # --- Chi-square test ---
@@ -1022,9 +1320,14 @@ class TrackingDataVisualizer:
         if self.use_instance_based:
             print("Analyzing transitions based on TRUE INSTANCES from Excel files...")
             
+            # --- CHASING ANALYSIS ---
             total_chasing_instances = 0
             num_chasing_instances_with_bino = 0
-            num_chasing_instances_with_bino_to_mono = 0  # NEW
+            num_chasing_instances_with_bino_to_mono = 0
+            
+            # --- ATTACK ANALYSIS (NEW) ---
+            total_attack_instances = 0
+            num_attack_instances_with_bino_to_mono = 0
             
             for file_key, instances in instance_data.items():
                 if not instances:
@@ -1033,20 +1336,25 @@ class TrackingDataVisualizer:
                 file_data = data[data['file'] == file_key]
                 
                 for instance in instances:
+                    # Get frames for this instance
+                    instance_frames = file_data[
+                        (file_data['frame'] >= instance['start_frame']) &
+                        (file_data['frame'] <= instance['end_frame'])
+                    ]
+                    
+                    if instance_frames.empty:
+                        continue
+                    
+                    # --- CHASING INSTANCES ---
                     if instance['behavior'] == 'chasing':
                         total_chasing_instances += 1
-                        
-                        instance_frames = file_data[
-                            (file_data['frame'] >= instance['start_frame']) &
-                            (file_data['frame'] <= instance['end_frame'])
-                        ]
                         
                         # Check if binocular zone appears
                         bino_appeared = (instance_frames['simple_zone'] == 'binocular').any()
                         if bino_appeared:
                             num_chasing_instances_with_bino += 1
                         
-                        # Check if bino→mono transition occurs (NEW)
+                        # Check if bino→mono transition occurs
                         bino_to_mono_occurred = (
                             (instance_frames['prev_simple_zone'] == 'binocular') &
                             (instance_frames['simple_zone'] == 'monocular')
@@ -1054,11 +1362,101 @@ class TrackingDataVisualizer:
                         
                         if bino_to_mono_occurred:
                             num_chasing_instances_with_bino_to_mono += 1
+                    
+                    # --- ATTACK INSTANCES (NEW) ---
+                    # Note: Attack instances need to be loaded from instance_data
+                    # For now, we'll analyze attack frames from the labeled data
             
-            # Calculate probabilities
+            # Now analyze attack instances from the labeled data
+            # Group attack frames into instances (consecutive attack frames)
+            attack_frames = data[data['behavior'] == 'attack'].copy()
+            
+            # NEW: Attack categorization counters
+            pure_bino_attacks = 0
+            pure_mono_attacks = 0
+            mixed_attacks = 0
+            attack_instance_details = []  # Store details for each attack
+            
+            if not attack_frames.empty:
+                attack_frames = attack_frames.sort_values(['file', 'frame'])
+                
+                for file_key in attack_frames['file'].unique():
+                    file_attack_frames = attack_frames[attack_frames['file'] == file_key].copy()
+                    
+                    # Identify attack instances (consecutive frames)
+                    file_attack_frames['frame_diff'] = file_attack_frames['frame'].diff()
+                    file_attack_frames['new_instance'] = (file_attack_frames['frame_diff'] > 1) | (file_attack_frames['frame_diff'].isna())
+                    file_attack_frames['instance_id'] = file_attack_frames['new_instance'].cumsum()
+                    
+                    for instance_id in file_attack_frames['instance_id'].unique():
+                        instance_attack_frames = file_attack_frames[file_attack_frames['instance_id'] == instance_id]
+                        
+                        if len(instance_attack_frames) > 0:
+                            total_attack_instances += 1
+                            
+                            # Check if bino→mono transition occurs during this attack instance
+                            bino_to_mono_occurred = (
+                                (instance_attack_frames['prev_simple_zone'] == 'binocular') &
+                                (instance_attack_frames['simple_zone'] == 'monocular')
+                            ).any()
+                            
+                            if bino_to_mono_occurred:
+                                num_attack_instances_with_bino_to_mono += 1
+                            
+                            # NEW: Categorize attack as pure-bino, pure-mono, or mixed
+                            zones_in_attack = instance_attack_frames['simple_zone'].dropna().unique()
+                            
+                            # Count frames in each zone
+                            zone_counts = instance_attack_frames['simple_zone'].value_counts()
+                            bino_frames = zone_counts.get('binocular', 0)
+                            mono_frames = zone_counts.get('monocular', 0)
+                            total_frames = len(instance_attack_frames)
+                            
+                            attack_type = 'unknown'
+                            
+                            if len(zones_in_attack) == 1:
+                                if zones_in_attack[0] == 'binocular':
+                                    pure_bino_attacks += 1
+                                    attack_type = 'pure_binocular'
+                                elif zones_in_attack[0] == 'monocular':
+                                    pure_mono_attacks += 1
+                                    attack_type = 'pure_monocular'
+                            elif len(zones_in_attack) > 1:
+                                mixed_attacks += 1
+                                attack_type = 'mixed'
+                            
+                            # Store details for this attack
+                            attack_instance_details.append({
+                                'file': file_key,
+                                'start_frame': instance_attack_frames['frame'].iloc[0],
+                                'end_frame': instance_attack_frames['frame'].iloc[-1],
+                                'duration': total_frames,
+                                'type': attack_type,
+                                'bino_frames': bino_frames,
+                                'mono_frames': mono_frames,
+                                'has_bino_to_mono': bino_to_mono_occurred
+                            })
+                                        
+            # Calculate chasing probabilities
             if total_chasing_instances > 0:
                 results['prob_mono_to_bino_given_chasing'] = num_chasing_instances_with_bino / total_chasing_instances
                 results['prob_bino_to_mono_given_chasing'] = num_chasing_instances_with_bino_to_mono / total_chasing_instances
+            
+            # Calculate attack probabilities (NEW)
+            results['total_attack_instances'] = total_attack_instances
+            results['attack_instances_with_bino_to_mono'] = num_attack_instances_with_bino_to_mono
+            
+            # NEW: Attack categorization results
+            results['pure_bino_attacks'] = pure_bino_attacks
+            results['pure_mono_attacks'] = pure_mono_attacks
+            results['mixed_attacks'] = mixed_attacks
+            results['attack_instance_details'] = attack_instance_details
+            
+            if total_attack_instances > 0:
+                results['prob_bino_to_mono_given_attack'] = num_attack_instances_with_bino_to_mono / total_attack_instances
+                results['ratio_pure_bino_attacks'] = pure_bino_attacks / total_attack_instances
+                results['ratio_pure_mono_attacks'] = pure_mono_attacks / total_attack_instances
+                results['ratio_mixed_attacks'] = mixed_attacks / total_attack_instances
             
             # P(Chasing | Transition)
             chasing_at_mono_to_bino = (data.loc[mono_to_bino_mask, 'behavior'] == 'chasing').sum()
@@ -1069,19 +1467,41 @@ class TrackingDataVisualizer:
             if total_bino_to_mono_transitions > 0:
                 results['prob_chasing_given_bino_to_mono'] = chasing_at_bino_to_mono / total_bino_to_mono_transitions
             
+            # P(Attack | Bino→Mono Transition)
+            attack_at_bino_to_mono = (data.loc[bino_to_mono_mask, 'behavior'] == 'attack').sum()
+            if total_bino_to_mono_transitions > 0:
+                results['prob_attack_given_bino_to_mono'] = attack_at_bino_to_mono / total_bino_to_mono_transitions
+            
+            print(f"\n{'='*60}")
+            print("CHASING ANALYSIS:")
             print(f"  Total true chasing instances found: {total_chasing_instances}")
             print(f"  P(Bino Appearance | Chasing Instance): {results['prob_mono_to_bino_given_chasing']:.3f}")
             print(f"  P(Bino→Mono Transition | Chasing Instance): {results['prob_bino_to_mono_given_chasing']:.3f}")
             print(f"  P(Chasing | Bino→Mono Transition): {results['prob_chasing_given_bino_to_mono']:.3f}")
-
+            
+            print(f"\n{'='*60}")
+            print("ATTACK ANALYSIS:")
+            print(f"  Total attack instances found: {total_attack_instances}")
+            print(f"  Attack instances with Bino→Mono: {num_attack_instances_with_bino_to_mono}")
+            print(f"  P(Bino→Mono Transition | Attack Instance): {results['prob_bino_to_mono_given_attack']:.3f}")
+            print(f"  P(Attack | Bino→Mono Transition): {results['prob_attack_given_bino_to_mono']:.3f}")
+            
+            print(f"\n{'='*60}")
+            print("ATTACK CATEGORIZATION:")
+            print(f"  Pure Binocular Attacks: {pure_bino_attacks} ({results.get('ratio_pure_bino_attacks', 0):.1%})")
+            print(f"  Pure Monocular Attacks: {pure_mono_attacks} ({results.get('ratio_pure_mono_attacks', 0):.1%})")
+            print(f"  Mixed Attacks: {mixed_attacks} ({results.get('ratio_mixed_attacks', 0):.1%})")
+            
         else:
             print("Analyzing transitions based on FRAMES...")
             
             chasing_mono_to_bino_transitions = (mono_to_bino_mask & (data['behavior'] == 'chasing')).sum()
             chasing_bino_to_mono_transitions = (bino_to_mono_mask & (data['behavior'] == 'chasing')).sum()
+            attack_bino_to_mono_transitions = (bino_to_mono_mask & (data['behavior'] == 'attack')).sum()
             
             mono_frames_in_chasing = (chasing_data['simple_zone'] == 'monocular').sum()
             bino_frames_in_chasing = (chasing_data['simple_zone'] == 'binocular').sum()
+            bino_frames_in_attack = (attack_data['simple_zone'] == 'binocular').sum()
             
             if mono_frames_in_chasing > 0:
                 results['prob_mono_to_bino_given_chasing'] = chasing_mono_to_bino_transitions / mono_frames_in_chasing
@@ -1089,16 +1509,22 @@ class TrackingDataVisualizer:
             if bino_frames_in_chasing > 0:
                 results['prob_bino_to_mono_given_chasing'] = chasing_bino_to_mono_transitions / bino_frames_in_chasing
             
+            if bino_frames_in_attack > 0:
+                results['prob_bino_to_mono_given_attack'] = attack_bino_to_mono_transitions / bino_frames_in_attack
+            
             if total_mono_to_bino_transitions > 0:
                 results['prob_chasing_given_mono_to_bino'] = chasing_mono_to_bino_transitions / total_mono_to_bino_transitions
             
             if total_bino_to_mono_transitions > 0:
                 results['prob_chasing_given_bino_to_mono'] = chasing_bino_to_mono_transitions / total_bino_to_mono_transitions
+                results['prob_attack_given_bino_to_mono'] = attack_bino_to_mono_transitions / total_bino_to_mono_transitions
             
             print(f"  Total monocular chasing frames: {mono_frames_in_chasing}")
             print(f"  Total binocular chasing frames: {bino_frames_in_chasing}")
+            print(f"  Total binocular attack frames: {bino_frames_in_attack}")
             print(f"  P(Mono→Bino | Chasing Frame): {results['prob_mono_to_bino_given_chasing']:.3f}")
             print(f"  P(Bino→Mono | Chasing Frame): {results['prob_bino_to_mono_given_chasing']:.3f}")
+            print(f"  P(Bino→Mono | Attack Frame): {results['prob_bino_to_mono_given_attack']:.3f}")
 
         # Common calculations
         if results['total_chasing_frames'] > 0:
@@ -1106,15 +1532,19 @@ class TrackingDataVisualizer:
             results['mono_chasing_ratio'] = (zone_counts.get('right_monocular', 0) + zone_counts.get('left_monocular', 0)) / results['total_chasing_frames']
             results['bino_chasing_ratio'] = zone_counts.get('binocular', 0) / results['total_chasing_frames']
         
+        print(f"\n{'='*60}")
+        print("TRANSITION PROBABILITIES:")
         print(f"  P(Chasing | Mono→Bino Transition): {results['prob_chasing_given_mono_to_bino']:.3f}")
         print(f"  P(Chasing | Bino→Mono Transition): {results['prob_chasing_given_bino_to_mono']:.3f}")
+        print(f"  P(Attack | Bino→Mono Transition): {results['prob_attack_given_bino_to_mono']:.3f}")
         
-        print("\nChasing & Binocular zone detailed statistics")
+        print(f"\n{'='*60}")
+        print("STATISTICAL SIGNIFICANCE:")
         print(f"  Chi-square: χ²={chi2:.2f}, p={p_value:.2e}, Cramér's V={cramers_v:.3f}")
         
         data.drop(columns=['simple_zone', 'prev_simple_zone'], inplace=True, errors='ignore')
         return results
-    
+        
     def run_complete_analysis(self) -> None:
         """Run the complete visualization analysis."""
         print("Starting data visualization analysis...")
@@ -1144,7 +1574,6 @@ class TrackingDataVisualizer:
         merged_data = self.merge_data(analysis_data, cricket_data, label_data) # <-- MODIFY THIS
         
         if merged_data.empty:
-
             print("Error: No merged data available!")
             return
         
@@ -1154,8 +1583,10 @@ class TrackingDataVisualizer:
         print("\n3. Calculating statistics...")
         stats = self.calculate_statistics(merged_data)
         
-        print("\n4. Calculating attack-specific statistics...")
-        attack_behavior_stats = self.calculate_attack_statistics(merged_data)
+        print("\n4. Calculating behavior-specific statistics...")
+        attack_stats = self.calculate_behavior_statistics(merged_data, 'attack')
+        chasing_behavior_stats = self.calculate_behavior_statistics(merged_data, 'chasing')
+        consume_stats = self.calculate_behavior_statistics(merged_data, 'consume')
 
         print("\n5. Analyzing chasing zones and transitions...")
         chasing_stats = self.analyze_chasing_zones(merged_data, instance_data)
@@ -1177,7 +1608,10 @@ class TrackingDataVisualizer:
         
         # Save summaries
         print("\n10. Saving statistical summaries...")
-        self.save_statistics_summary(merged_data, stats, chasing_stats, corr_stats, attack_behavior_stats)
+        self.save_statistics_summary(
+            merged_data, stats, chasing_stats, corr_stats, 
+            attack_stats, chasing_behavior_stats, consume_stats
+        )
         
         print(f"\nAnalysis complete! Results saved to: {self.output_dir}")
 
