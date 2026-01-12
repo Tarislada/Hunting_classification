@@ -635,8 +635,15 @@ class TrackingDataVisualizer:
             return None
 
         sample_data = data.sample(n=min(5000, len(data)), random_state=42).copy()
-        sample_data['abs_head_angle'] = sample_data['head_angle'].abs()
+        
+        # sample_data['abs_head_angle'] = sample_data['head_angle'].abs()
+        # sample_data = sample_data[sample_data['head_angle'].abs() < 120].copy()
+        sample_data['abs_head_angle'] = sample_data['cricket_angle'].abs()
+        sample_data = sample_data[sample_data['cricket_angle'].abs() < 120].copy()
+        sample_data['mouse_speed'] = sample_data['mouse_speed']*30/27.076
+        
         corr_data = sample_data[['abs_head_angle', 'mouse_speed']].dropna()
+        # corr_data = sample_data[['abs_cricket_angle', 'mouse_speed']].dropna()
         
         if len(corr_data) < 2:
             print("Not enough data to calculate correlation.")
@@ -652,15 +659,18 @@ class TrackingDataVisualizer:
         sns.regplot(data=corr_data, x='abs_head_angle', y='mouse_speed', ax=ax1,
                     scatter_kws={'alpha': 0.3, 's': 15, 'color': 'lightcoral'},
                     line_kws={'color': 'red'})
-        ax1.set_title('Mouse Head Angle vs. Speed Correlation (Original)')
-        ax1.set_xlabel('Absolute Head Angle (degrees)')
-        ax1.set_ylabel('Mouse Speed (pixels/frame)')
+        # ax1.set_title('Mouse Head Angle vs. Speed Correlation')
+        ax1.set_title('Cricket Angle vs. Speed Correlation')
+        # ax1.set_xlabel('Absolute Head Angle (degrees)',fontsize=22)
+        ax1.set_xlabel('Absolute Cricket Angle (degrees)',fontsize=22)
+        ax1.set_ylabel('Mouse Speed (cm/s)',fontsize=22)
+        ax1.tick_params(axis='both', which='major', labelsize=18)
         ax1.grid(True, alpha=0.3)
         stats_text_orig = f"Spearman's ρ: {rho_orig:.3f}\np-value: {p_orig:.3g}"
-        ax1.text(0.95, 0.95, stats_text_orig, transform=ax1.transAxes, fontsize=12,
+        ax1.text(0.95, 0.95, stats_text_orig, transform=ax1.transAxes, fontsize=18,
                  verticalalignment='top', horizontalalignment='right',
                  bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        fig.savefig(self.output_dir / 'angle_speed_correlation.png', dpi=300, bbox_inches='tight')
+        fig.savefig(self.output_dir / 'angle_speed_correlation.svg', dpi=300, bbox_inches='tight', format='svg')
         plt.close(fig)
         print("Saved original angle-speed correlation plot.")
 
@@ -698,15 +708,18 @@ class TrackingDataVisualizer:
             print("Warning: 'file' column not found - cannot group by animal.")
             return
 
-        plot_data = data[['head_angle', 'mouse_speed', 'file']].dropna().copy()
-        plot_data['abs_head_angle'] = plot_data['head_angle'].abs()
+        # plot_data = data[['head_angle', 'mouse_speed', 'file']].dropna().copy()
+        # plot_data['abs_head_angle'] = plot_data['head_angle'].abs()
+        plot_data = data[['cricket_angle', 'mouse_speed', 'file']].dropna().copy()
+        plot_data['abs_head_angle'] = plot_data['cricket_angle'].abs()
+        plot_data['mouse_speed'] = plot_data['mouse_speed']*30/27.076
         
         # Extract animal ID
         plot_data['animal_id'] = plot_data['file'].str.extract(r'(m\d+)')[0]
 
-        # Define bins for the absolute head angle
-        bins = [0, 15, 30, 45, 60, 90, 180]
-        labels = ['0-15°', '15-30°', '30-45°', '45-60°', '60-90°', '>90°']
+        # Define bins for the absolute cricket angle
+        bins = [0, 15, 30, 45, 60, 75, 90, 105, 120]
+        labels = ['0-15°', '15-30°', '30-45°', '45-60°', '60-75°', '75-90°', '90-105°', '105-120°']
         plot_data['angle_bin'] = pd.cut(plot_data['abs_head_angle'], bins=bins, labels=labels, right=False)
 
         # --- 1. AGGREGATE PLOT (All Animals Combined) ---
@@ -721,9 +734,12 @@ class TrackingDataVisualizer:
             plt.errorbar(x=bin_stats_agg.index, y=bin_stats_agg['mean'], yerr=bin_stats_agg['std'], 
                         fmt='none', c='black', capsize=5)
             
-            ax.set_title('Mean Mouse Speed by Head Angle Range (All Animals)', fontsize=16, weight='bold')
-            ax.set_xlabel('Absolute Head Angle Range', fontsize=14)
-            ax.set_ylabel('Mean Mouse Speed (pixels/frame)', fontsize=14)
+            # ax.set_title('Mean Mouse Speed by Head Angle Range (All Animals)', fontsize=16, weight='bold')
+            ax.set_title('Mean Mouse Speed by Cricekt Angle Range (All Animals)', fontsize=16, weight='bold')
+            # ax.set_xlabel('Absolute Head Angle Range', fontsize=14)
+            ax.set_xlabel('Absolute Cricket Angle Range', fontsize=14)
+            # ax.set_ylabel('Mean Mouse Speed (pixels/frame)', fontsize=14)
+            ax.set_ylabel('Mean Mouse Speed (cm/s)', fontsize=14)
             ax.grid(axis='y', linestyle='--', alpha=0.7)
 
             # Add count labels on top of bars
@@ -784,8 +800,10 @@ class TrackingDataVisualizer:
             
             # Formatting
             ax.set_title(f'{animal_id.upper()} (n={len(animal_data)} frames)', fontsize=13, weight='bold')
-            ax.set_xlabel('Absolute Head Angle Range', fontsize=11)
-            ax.set_ylabel('Mean Speed (pixels/frame)', fontsize=11)
+            # ax.set_xlabel('Absolute Head Angle Range', fontsize=11)
+            ax.set_xlabel('Absolute Cricket Angle Range', fontsize=11)
+            # ax.set_ylabel('Mean Speed (pixels/frame)', fontsize=11)
+            ax.set_ylabel('Mean Speed (cm/s)', fontsize=11)
             ax.set_xticks(bin_stats.index)
             ax.set_xticklabels(bin_stats['angle_bin'], rotation=45, ha='right')
             ax.grid(axis='y', linestyle='--', alpha=0.5)
@@ -803,8 +821,11 @@ class TrackingDataVisualizer:
         for idx in range(n_animals, len(axes)):
             axes[idx].set_visible(False)
         
-        fig.suptitle('Mean Mouse Speed by Head Angle Range (Per Animal)', 
+        # fig.suptitle('Mean Mouse Speed by Head Angle Range (Per Animal)', 
+        #             fontsize=16, weight='bold', y=0.995)
+        fig.suptitle('Mean Mouse Speed by Cricket Angle Range (Per Animal)', 
                     fontsize=16, weight='bold', y=0.995)
+        
         plt.tight_layout()
         plt.savefig(self.output_dir / 'binned_speed_vs_angle_per_animal.png', dpi=300, bbox_inches='tight')
         plt.close()
@@ -815,6 +836,16 @@ class TrackingDataVisualizer:
         
         # Calculate mean speed for each animal in each bin
         animal_bin_means = plot_data.groupby(['animal_id', 'angle_bin'])['mouse_speed'].mean().reset_index()
+        # Pivot the data so each animal is a column
+        prism_export = animal_bin_means.pivot(index='angle_bin', columns='animal_id', values='mouse_speed')
+        
+        # Save to CSV
+        prism_export.to_csv(self.output_dir / 'binned_speed_data_for_prism.csv')
+        print("  Saved binned speed data for Prism/GraphPad.")
+        
+        # Also save in long format (alternative format some people prefer)
+        animal_bin_means.to_csv(self.output_dir / 'binned_speed_data_long_format.csv', index=False)
+        print("  Saved binned speed data in long format.")
         
         # Calculate statistics across animals for each bin
         bin_stats_across_animals = animal_bin_means.groupby('angle_bin')['mouse_speed'].agg([
@@ -834,15 +865,36 @@ class TrackingDataVisualizer:
                      color='#4CAF50', alpha=0.7, edgecolor='black', linewidth=1.5)
         
         # Add error bars (SEM)
-        ax.errorbar(x_pos, bin_stats_across_animals['mean'], 
-                   yerr=bin_stats_across_animals['sem'],
-                   fmt='none', c='black', capsize=8, capthick=2, linewidth=2)
+        # --- NEW: Add individual animal data as scatter points (NO LINES) ---
+        unique_animals = animal_bin_means['animal_id'].unique()
         
+        # Create a mapping from angle_bin to x position
+        angle_to_x = {angle: idx for idx, angle in enumerate(bin_stats_across_animals['angle_bin'])}
+        
+        for animal_id in unique_animals:
+            animal_data = animal_bin_means[animal_bin_means['animal_id'] == animal_id].copy()
+            
+            # Map angle bins to x positions
+            animal_data['x_pos'] = animal_data['angle_bin'].map(angle_to_x)
+            animal_data = animal_data.dropna(subset=['x_pos'])  # Remove any unmapped bins
+            
+            if len(animal_data) > 0:
+                # Plot points only (NO LINES)
+                ax.scatter(animal_data['x_pos'], animal_data['mouse_speed'],
+                          facecolors='none',  # Transparent fill
+                          edgecolors='grey',  # Grey outline
+                          s=80,               # Point size
+                          linewidths=1.5,     # Outline thickness
+                          alpha=0.7,          # Slight transparency for outline
+                          zorder=2)           # Draw on top of bars
         # Formatting
-        ax.set_title('Mean Mouse Speed by Head Angle Range (Across Animals)', 
+        # ax.set_title('Mean Mouse Speed by Head Angle Range (Across Animals)', 
+        #             fontsize=18, weight='bold', pad=20)
+        # ax.set_xlabel('Absolute Head Angle Range', fontsize=15, weight='bold')
+        ax.set_title('Mean Mouse Speed by Cricket Angle Range (Across Animals)', 
                     fontsize=18, weight='bold', pad=20)
-        ax.set_xlabel('Absolute Head Angle Range', fontsize=15, weight='bold')
-        ax.set_ylabel('Mean Mouse Speed (pixels/frame)', fontsize=15, weight='bold')
+        ax.set_xlabel('Absolute Cricket Angle Range', fontsize=15, weight='bold')
+        ax.set_ylabel('Mean Mouse Speed (cm/s)', fontsize=15, weight='bold')
         ax.set_xticks(x_pos)
         ax.set_xticklabels(bin_stats_across_animals['angle_bin'], fontsize=12)
         ax.grid(axis='y', linestyle='--', alpha=0.5)
@@ -1058,9 +1110,12 @@ class TrackingDataVisualizer:
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         
         pie_colors = {
-            'Binocular': '#4CAF50', 
-            'Monocular': '#BDBDBD',
-            'Out of Sight': '#FF6B6B'
+            # 'Binocular': '#FF6B6B', 
+            'Binocular': 'red',
+            # 'Monocular': '#4CAF50',
+            'Monocular': 'green',
+            # 'Out of Sight': '#BDBDBD'
+            'Out of Sight': 'gray'
         }
         
         display_behaviors = [display_labels[b] for b in ['chasing', 'attack', 'consume']]
@@ -1545,6 +1600,205 @@ class TrackingDataVisualizer:
         data.drop(columns=['simple_zone', 'prev_simple_zone'], inplace=True, errors='ignore')
         return results
         
+    def analyze_peripheral_behavior_distribution(self, data: pd.DataFrame, angle_threshold: float = 140) -> Dict:
+        """
+        Analyze behavior distribution when cricket is at extreme peripheral angles (>140°).
+        
+        Args:
+            data: DataFrame containing tracking data
+            angle_threshold: Absolute cricket angle threshold (default 140°)
+        
+        Returns:
+            Dictionary containing behavior counts and proportions for peripheral angles
+        """
+        print(f"\nAnalyzing behavior distribution for cricket angles > {angle_threshold}°...")
+        
+        if 'cricket_angle' not in data.columns or 'behavior' not in data.columns:
+            print("Warning: 'cricket_angle' or 'behavior' not available.")
+            return {}
+        
+        # Filter for peripheral angles
+        peripheral_data = data[data['cricket_angle'].abs() > angle_threshold].copy()
+        
+        if peripheral_data.empty:
+            print(f"No frames found with absolute cricket angle > {angle_threshold}°")
+            return {}
+        
+        # Calculate behavior distribution
+        behavior_counts = peripheral_data['behavior'].value_counts()
+        total_peripheral_frames = len(peripheral_data)
+        behavior_proportions = behavior_counts / total_peripheral_frames
+        
+        # Create results dictionary
+        results = {
+            'angle_threshold': angle_threshold,
+            'total_peripheral_frames': total_peripheral_frames,
+            'behavior_counts': behavior_counts.to_dict(),
+            'behavior_proportions': behavior_proportions.to_dict(),
+            'total_frames_in_dataset': len(data),
+            'peripheral_frame_ratio': total_peripheral_frames / len(data)
+        }
+        
+        # Print summary
+        print(f"\n{'='*60}")
+        print(f"PERIPHERAL ANGLE ANALYSIS (>±{angle_threshold}°):")
+        print(f"{'='*60}")
+        print(f"Total frames at peripheral angles: {total_peripheral_frames} ({results['peripheral_frame_ratio']:.1%} of all frames)")
+        print(f"\nBehavior Distribution:")
+        print("-" * 60)
+        
+        for behavior in sorted(behavior_counts.index):
+            count = behavior_counts[behavior]
+            proportion = behavior_proportions[behavior]
+            print(f"  {behavior.capitalize():<15}: {count:>6} frames ({proportion:>6.1%})")
+        
+        # Per-animal breakdown
+        if 'file' in peripheral_data.columns:
+            peripheral_data['animal_id'] = peripheral_data['file'].str.extract(r'(m\d+)')[0]
+            
+            print(f"\n{'='*60}")
+            print("PER-ANIMAL BREAKDOWN:")
+            print("-" * 60)
+            
+            results['per_animal'] = {}
+            
+            for animal_id in sorted(peripheral_data['animal_id'].dropna().unique()):
+                animal_data = peripheral_data[peripheral_data['animal_id'] == animal_id]
+                animal_behavior_counts = animal_data['behavior'].value_counts()
+                animal_total = len(animal_data)
+                
+                results['per_animal'][animal_id] = {
+                    'total_frames': animal_total,
+                    'behavior_counts': animal_behavior_counts.to_dict(),
+                    'behavior_proportions': (animal_behavior_counts / animal_total).to_dict()
+                }
+                
+                print(f"\n{animal_id.upper()} (n={animal_total} peripheral frames):")
+                for behavior in sorted(animal_behavior_counts.index):
+                    count = animal_behavior_counts[behavior]
+                    proportion = count / animal_total
+                    print(f"  {behavior.capitalize():<15}: {count:>6} frames ({proportion:>6.1%})")
+        
+        # Create visualization
+        self._plot_peripheral_behavior_distribution(peripheral_data, angle_threshold, results)
+        
+        # Save to CSV
+        self._save_peripheral_behavior_stats(results)
+        
+        return results
+    
+    def _plot_peripheral_behavior_distribution(self, peripheral_data: pd.DataFrame, 
+                                               angle_threshold: float, results: Dict) -> None:
+        """Create bar plot and pie chart for peripheral angle behavior distribution."""
+        
+        behavior_counts = pd.Series(results['behavior_counts']).sort_values(ascending=False)
+        
+        # Display labels
+        display_labels = {
+            'attack': 'Attacking',
+            'background': 'Other',
+            'chasing': 'Chasing',
+            'consume': 'Consuming'
+        }
+        
+        behavior_counts.index = [display_labels.get(b, b.capitalize()) for b in behavior_counts.index]
+        
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+        
+        # --- Subplot 1: Bar Chart ---
+        colors = sns.color_palette("Set2", len(behavior_counts))
+        bars = ax1.bar(range(len(behavior_counts)), behavior_counts.values, 
+                      color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
+        
+        ax1.set_title(f'Behavior Distribution at Peripheral Angles (>±{angle_threshold}°)', 
+                     fontsize=16, weight='bold', pad=20)
+        ax1.set_xlabel('Behavior', fontsize=14, weight='bold')
+        ax1.set_ylabel('Frame Count', fontsize=14, weight='bold')
+        ax1.set_xticks(range(len(behavior_counts)))
+        ax1.set_xticklabels(behavior_counts.index, rotation=45, ha='right', fontsize=12)
+        ax1.grid(axis='y', linestyle='--', alpha=0.5)
+        
+        # Add count and percentage labels on bars
+        for i, (bar, count) in enumerate(zip(bars, behavior_counts.values)):
+            height = bar.get_height()
+            percentage = (count / results['total_peripheral_frames']) * 100
+            ax1.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{int(count)}\n({percentage:.1f}%)',
+                    ha='center', va='bottom', fontsize=11, weight='bold')
+        
+        # --- Subplot 2: Pie Chart ---
+        wedges, texts, autotexts = ax2.pie(
+            behavior_counts.values,
+            labels=behavior_counts.index,
+            autopct='%1.1f%%',
+            colors=colors,
+            startangle=90,
+            textprops={'fontsize': 12, 'weight': 'bold'}
+        )
+        
+        for autotext in autotexts:
+            autotext.set_color('white')
+            autotext.set_fontsize(13)
+        
+        ax2.set_title(f'Behavior Proportions at Peripheral Angles\n(n={results["total_peripheral_frames"]} frames)', 
+                     fontsize=16, weight='bold', pad=20)
+        
+        # Add summary stats
+        stats_text = (f"Peripheral angle threshold: ±{angle_threshold}°\n"
+                     f"Total peripheral frames: {results['total_peripheral_frames']}\n"
+                     f"Proportion of all frames: {results['peripheral_frame_ratio']:.1%}")
+        
+        fig.text(0.5, -0.05, stats_text, ha='center', fontsize=11,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='black'))
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / f'peripheral_behavior_distribution_{int(angle_threshold)}deg.png', 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved peripheral behavior distribution plot.")
+    
+    def _save_peripheral_behavior_stats(self, results: Dict) -> None:
+        """Save peripheral behavior statistics to CSV files."""
+        
+        angle_threshold = results['angle_threshold']
+        
+        # --- 1. Overall statistics ---
+        overall_df = pd.DataFrame({
+            'behavior': list(results['behavior_counts'].keys()),
+            'count': list(results['behavior_counts'].values()),
+            'proportion': list(results['behavior_proportions'].values())
+        })
+        overall_df = overall_df.sort_values('count', ascending=False)
+        overall_df.to_csv(
+            self.output_dir / f'peripheral_behavior_overall_{int(angle_threshold)}deg.csv',
+            index=False
+        )
+        print(f"Saved overall peripheral behavior statistics to CSV.")
+        
+        # --- 2. Per-animal statistics ---
+        if 'per_animal' in results:
+            per_animal_rows = []
+            
+            for animal_id, animal_stats in results['per_animal'].items():
+                for behavior, count in animal_stats['behavior_counts'].items():
+                    proportion = animal_stats['behavior_proportions'][behavior]
+                    per_animal_rows.append({
+                        'animal_id': animal_id,
+                        'behavior': behavior,
+                        'count': count,
+                        'proportion': proportion,
+                        'total_peripheral_frames': animal_stats['total_frames']
+                    })
+            
+            per_animal_df = pd.DataFrame(per_animal_rows)
+            per_animal_df = per_animal_df.sort_values(['animal_id', 'count'], ascending=[True, False])
+            per_animal_df.to_csv(
+                self.output_dir / f'peripheral_behavior_per_animal_{int(angle_threshold)}deg.csv',
+                index=False
+            )
+            print(f"Saved per-animal peripheral behavior statistics to CSV.")
+
     def run_complete_analysis(self) -> None:
         """Run the complete visualization analysis."""
         print("Starting data visualization analysis...")
@@ -1590,6 +1844,9 @@ class TrackingDataVisualizer:
 
         print("\n5. Analyzing chasing zones and transitions...")
         chasing_stats = self.analyze_chasing_zones(merged_data, instance_data)
+        # NEW: Analyze peripheral angle behavior
+        print("\n5b. Analyzing peripheral angle behavior...")
+        peripheral_stats = self.analyze_peripheral_behavior_distribution(merged_data, angle_threshold=120)
 
         # Create visualizations
         print("\n6. Creating histograms...")
@@ -1639,7 +1896,7 @@ def main():
         # OUTPUT_DIR, 
         OUTPUT_DIR_PRED,
         instance_dir=INSTANCE_DIR,
-        use_predictions=True,
+        use_predictions=False,
         prediction_dir=PREDICTION_DIR
     )
     visualizer.run_complete_analysis()
