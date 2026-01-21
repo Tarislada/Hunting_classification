@@ -348,7 +348,17 @@ class CricketProcessor:
         try:
             # Load data
             data = pd.read_csv(csv_path, header=None)
-            data = data.iloc[:, :7]  # Select only first 7 columns
+            # ✅ FIX: Check number of columns and handle accordingly
+            if data.shape[1] == 8:
+                # Cricket detector outputs 8 columns: frame, trackID, ?, x, y, w, h, confidence
+                # The third column is unknown/unused, skip it
+                data = data.iloc[:, [0, 1, 3, 4, 5, 6, 7]]  # Skip column 2
+                print(f"  Detected 8-column format, skipping column 2")
+            elif data.shape[1] == 7:
+                # Standard 7-column format
+                data = data.iloc[:, :7]
+            else:
+                raise ValueError(f"Unexpected CSV format: {data.shape[1]} columns")
             
             # Assign column names
             data.columns = ['frame', 'trackID', 'x', 'y', 'w', 'h', 'confidence']

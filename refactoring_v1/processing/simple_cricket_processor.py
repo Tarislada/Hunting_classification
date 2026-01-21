@@ -1,57 +1,79 @@
 """
-Simple cricket processing with basic interpolation and filtering only.
+Simple cricket processing with basic interpolation and filtering only. 
 Bypasses complicated validation and adaptive smoothing.
 """
 
 import numpy as np
 import pandas as pd
-from scipy. interpolate import interp1d
+from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 import re
 import os
 from pathlib import Path
 from typing import Tuple, Dict, Optional
-from config. settings import settings
+from config.settings import settings
 
 
-class SimpleCricketProcessor: 
+class SimpleCricketProcessor:  
     """
     Simplified cricket processor that only does basic interpolation and filtering.
-    Bypasses complicated validation, reliability scoring, and adaptive smoothing. 
+    Bypasses complicated validation, reliability scoring, and adaptive smoothing.  
     """
     
     def __init__(self, config=None):
         """
-        Initialize the simple cricket processor. 
+        Initialize the simple cricket processor.  
         
-        Args:
-            config: Configuration object. If None, uses global settings.
+        Args: 
+            config: Configuration object.  If None, uses global settings.
         """
-        self. config = config or settings.cricket_validation
+        self.config = config or settings.cricket_validation
         self.cricket_in_frame = None
-        self. cricket_out_frame = None
+        self.cricket_out_frame = None
     
     def get_cricket_frames(self, txt_content: str) -> Tuple[int, int]:
-        """Extract cricket in/out frames from txt file."""
-        cricket_in = re.search(r'cricket in frame:\s*(\d+)', txt_content, re.IGNORECASE)
-        cricket_out = re.search(r'cricket out frame:\s*(\d+)', txt_content, re.IGNORECASE)
+        """Extract cricket start frame and final frame from text file."""
+        # Extract cricket in frame
+        in_match = re.search(r"cricket in 부터\((\d+)\)", txt_content)
+        if not in_match:
+            raise ValueError("Cricket start frame not found in text file.")
+        cricket_in_frame = int(in_match.group(1))
         
-        cricket_in_frame = int(cricket_in.group(1)) if cricket_in else 0
-        cricket_out_frame = int(cricket_out.group(1)) if cricket_out else float('inf')
+        # First attempt:  Look for the last 'consume' entry
+        lines = txt_content.strip().split('\n')
+        consume_lines = [line for line in lines if line.strip().endswith('consume')]
+        
+        if consume_lines:
+            # If we found consume lines, use the last one
+            last_consume = consume_lines[-1]
+            try:
+                cricket_out_frame = int(last_consume.split('\t')[1])
+                return cricket_in_frame, cricket_out_frame
+            except (IndexError, ValueError):
+                pass  # If parsing fails, continue to the fallback method
+        
+        # Fallback method: Find the largest number in the text
+        all_numbers = re.findall(r'\d+', txt_content)
+        if not all_numbers:
+            raise ValueError("No frame numbers found in text file")
+        
+        cricket_out_frame = max(int(num) for num in all_numbers)
         
         return cricket_in_frame, cricket_out_frame
     
-    def simple_interpolate(self, data: pd. DataFrame) -> pd.DataFrame:
+    def simple_interpolate(self, data: pd.DataFrame, max_gap: int = 30) -> pd.DataFrame:
         """
         Simple linear interpolation for missing values.
-        Only interpolates small gaps (< 30 frames).
+        Only interpolates small gaps (< max_gap frames).
         """
-        max_gap = 30
         coords = ['x', 'y', 'w', 'h']
         
         for coord in coords:
+            # Replace -1 with NaN
+            data[coord] = data[coord].replace(-1, np. nan)
+            
             # Find valid indices
-            valid_mask = data[coord] != -1
+            valid_mask = ~data[coord].isna()
             valid_indices = data[valid_mask].index. to_numpy()
             valid_values = data. loc[valid_mask, coord].to_numpy()
             
@@ -67,13 +89,13 @@ class SimpleCricketProcessor:
                                   fill_value=(valid_values[0], valid_values[-1]))
             
             # Interpolate all indices
-            all_indices = data. index.to_numpy()
+            all_indices = data.index.to_numpy()
             interpolated = interp_func(all_indices)
             
             # Only keep interpolation for small gaps
             result = data[coord].copy()
             for i in range(len(data)):
-                if data.loc[i, coord] == -1:
+                if pd.isna(data.loc[i, coord]):
                     # Find gap size
                     prev_valid = data.loc[: i][valid_mask[: i+1]].index
                     next_valid = data. loc[i: ][valid_mask[i:]].index
@@ -93,17 +115,17 @@ class SimpleCricketProcessor:
     def basic_filter(self, data: pd.DataFrame, window_length: int = 11, polyorder: int = 3) -> pd.DataFrame:
         """
         Apply basic Savitzky-Golay filtering to smoothed coordinates.
-        Only filters where we have valid data.
+        Only filters where we have valid data. 
         """
         coords = ['x', 'y', 'w', 'h']
         
-        for coord in coords:
+        for coord in coords: 
             smoothed_col = f'smoothed_{coord}'
             
             # Only filter valid segments
-            valid_mask = data[smoothed_col] != -1
+            valid_mask = ~pd.isna(data[smoothed_col])
             
-            if valid_mask.sum() >= window_length: 
+            if valid_mask.sum() >= window_length:  
                 # Apply filter to valid segments
                 filtered = data[smoothed_col]. copy()
                 
@@ -120,26 +142,38 @@ class SimpleCricketProcessor:
                             filtered_segment = savgol_filter(segment_data, 
                                                             window_length, 
                                                             polyorder)
-                            filtered.iloc[segment] = filtered_segment
+                            filtered. iloc[segment] = filtered_segment
                 
                 data[smoothed_col] = filtered
         
         return data
     
-    def process_file(self, csv_path: str, txt_path: str, output_path:  str) -> bool:
+    def process_file(self, csv_path: str, txt_path: str, output_path: str) -> bool:
         """Process a single pair of CSV and TXT files with simple interpolation and filtering."""
         try:
             # Load data
             data = pd.read_csv(csv_path, header=None)
-            data = data.iloc[:, :7]  # Select only first 7 columns
+            
+            # ✅ FIX: Check number of columns and handle accordingly
+            if data.shape[1] == 8:
+                # Cricket detector outputs 8 columns: frame, trackID, ?, x, y, w, h, confidence
+                # The third column is unknown/unused, skip it
+                data = data.iloc[:, [0, 1, 3, 4, 5, 6, 7]]  # Skip column 2
+                print(f"  Detected 8-column format, skipping column 2")
+            elif data.shape[1] == 7:
+                # Standard 7-column format
+                data = data.iloc[:, :7]
+            else:
+                raise ValueError(f"Unexpected CSV format: {data.shape[1]} columns")
             
             # Assign column names
             data.columns = ['frame', 'trackID', 'x', 'y', 'w', 'h', 'confidence']
             
             # Apply downsampling if configured
+            # ✅ FIX: Keep original frame numbers
             if self.config.downsample_60fps:
                 data = data[data['frame'] % 2 == 0].reset_index(drop=True)
-                data['frame'] = data['frame'] // 2
+                # data['frame'] = data['frame'] // 2  # ← REMOVE THIS LINE
             
             # Get cricket frames
             with open(txt_path, 'r', encoding='utf-8') as f:
@@ -147,40 +181,49 @@ class SimpleCricketProcessor:
             
             print(f"  Cricket frames:  {self.cricket_in_frame} to {self.cricket_out_frame}")
             
-            # Replace -1 with NaN for easier handling
-            for col in ['x', 'y', 'w', 'h']:
-                data[col] = data[col].replace(-1, np.nan)
-            
             # Cut data from cricket_in_frame
             data = data[data['frame'] >= self.cricket_in_frame]. reset_index(drop=True)
             
-            # Replace NaN back to -1 for processing
-            for col in ['x', 'y', 'w', 'h']:
-                data[col] = data[col].fillna(-1)
-            
             # Simple interpolation
-            data = self. simple_interpolate(data)
+            data = self. simple_interpolate(data, max_gap=30)
             
             # Basic filtering
             data = self.basic_filter(data)
             
-            # Add status column (all marked as valid for simple processing)
+            # Add status column (mark as valid if we have smoothed data, missing if not)
             data['status'] = 'valid'
-            data. loc[data['x'] == -1, 'status'] = 'missing'
+            missing_mask = (pd.isna(data['smoothed_x']) | 
+                          pd.isna(data['smoothed_y']) | 
+                          pd.isna(data['smoothed_w']) | 
+                          pd.isna(data['smoothed_h']))
+            data.loc[missing_mask, 'status'] = 'missing'
             
-            # Save output with minimal columns
+            # Add use_nose_position flag (always False for simple processing)
+            # In simple mode, we trust the interpolated cricket positions
+            data['use_nose_position'] = False
+            
+            # Add placeholder columns to match expected output format
+            # These are not calculated in simple mode but are expected by feature_engineer
+            data['speed'] = 0.0
+            data['size'] = data['smoothed_w'] * data['smoothed_h']
+            data['reliability_score'] = 1.0  # Always 1.0 in simple mode
+            
+            # Save output with minimal columns (but include all expected columns)
             columns_to_save = [
                 'frame', 'x', 'y', 'w', 'h', 'confidence',
                 'smoothed_x', 'smoothed_y', 'smoothed_w', 'smoothed_h',
-                'status'
+                'status', 'use_nose_position', 
+                'speed', 'size', 'reliability_score'
             ]
             
-            data[columns_to_save].to_csv(output_path, index=False)
+            data[columns_to_save]. to_csv(output_path, index=False)
             print(f"  ✓ Successfully processed (simple mode)")
             return True
             
         except Exception as e:
             print(f"  ✗ Error:  {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def process_directory(self, cricket_dir: str, txt_dir: str, output_dir: str) -> dict:
@@ -189,7 +232,7 @@ class SimpleCricketProcessor:
         
         csv_files = list(Path(cricket_dir).glob('*.csv'))
         
-        if not csv_files: 
+        if not csv_files:  
             print(f"No CSV files found in {cricket_dir}")
             return {"processed": 0, "failed": 0, "files": []}
         
@@ -206,8 +249,8 @@ class SimpleCricketProcessor:
             print(f"Processing {csv_path.name}...")
             
             if not txt_path.exists():
-                print(f"  ✗ Missing TXT file: {txt_path.name}")
-                failed.append(csv_path.name)
+                print(f"  ✗ Missing TXT file: {txt_path. name}")
+                failed.append(csv_path. name)
                 continue
             
             if self.process_file(str(csv_path), str(txt_path), str(output_path)):
@@ -234,7 +277,7 @@ class SimpleCricketProcessor:
         
         Args:
             cricket_dir: Override cricket detection directory (uses config if None)
-            txt_dir: Override txt directory (uses config if None) 
+            txt_dir:  Override txt directory (uses config if None) 
             output_dir: Override output directory (uses config if None)
             
         Returns:

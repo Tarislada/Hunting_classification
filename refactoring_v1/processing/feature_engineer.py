@@ -294,6 +294,7 @@ class FeatureEngineer:
             # Update filters
             filtered_cricket_angle, filtered_distance = self.analyzer.update_filters(cricket_angle, distance)
             
+            # TODO: Compare to below
             dxc = nose_pos[0] - body_center[0]
             dyc = nose_pos[1] - body_center[1]
             cricket_baseline = np.rad2deg(np.arctan2(-dyc, dxc))
@@ -305,6 +306,17 @@ class FeatureEngineer:
                 int(nose_pos[1] - 100 * np.sin(np.deg2rad(adjusted_cricket_angle)))
             )
             cv2.line(frame, self.visualizer._to_int_tuple(nose_pos), cricket_angle_end, (255, 255, 0), 2)
+            
+            # # ✅ TODO: Suggested FIX: Calculate the absolute angle from nose to cricket in screen coordinates
+            # dx_cricket = cricket_pos[0] - nose_pos[0]
+            # dy_cricket = cricket_pos[1] - nose_pos[1]
+            # absolute_cricket_angle = np.rad2deg(np.arctan2(-dy_cricket, dx_cricket))
+        
+            # cricket_angle_end = (
+            #     int(nose_pos[0] + 100 * np.cos(np.deg2rad(absolute_cricket_angle))),
+            #     int(nose_pos[1] - 100 * np.sin(np.deg2rad(absolute_cricket_angle)))
+            # )
+            # cv2.line(frame, self.visualizer._to_int_tuple(nose_pos), cricket_angle_end, (255, 255, 0), 2)
     
             # Classify visual field
             zone = self.analyzer.classify_visual_field(adjusted_head_angle, cricket_angle)
@@ -344,156 +356,172 @@ class FeatureEngineer:
             'tail_base': tail_base,
             'body_center': body_center,
             'nose': nose_pos,
+            'cricket_pos': cricket_pos,  # ✅ Added cricket position!
         }
     
     def process_video(self, video_path: str, pose_data_path: str, 
-                     cricket_data_path: str, output_path: str) -> bool:
+                 cricket_data_path: str, output_path: str) -> bool:
         """Process a single video with visual field analysis."""
         try:
             # Initialize analyzers
             self.analyzer = AngleAnalyzer(self.config)
             self.visualizer = VisualFieldVisualizer(self.config)
             
-            resol_x = self.config.x_resol
-            resol_y = self.config.y_resol
             downsampleflag = False
-            
-            # Load data
-            pose_data = pd.read_csv(pose_data_path)
-            # Check if the coordinates are normalized
-            if pose_data['body center x'].values.max() < 1.1:
-                pose_data.loc[:, ['body center x', 'nose x', 'tail base x']] *= resol_x
-                pose_data.loc[:, ['body center y', 'nose y', 'tail base y']] *= resol_y
-
             cricket_data = pd.read_csv(cricket_data_path)
-            
-            # Initialize results DataFrame
+                    
             results = pd.DataFrame()
             
             # Open video
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
-                raise ValueError(f"Could not open video file: {video_path}")
-                
-            # Initialize video writer
+                print(f"Error: Could not open video {video_path}")
+                return False
+            
+            # Get video properties
             frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             original_fps = int(cap.get(cv2.CAP_PROP_FPS))
             
-            if original_fps > 30:
-                pose_data = pose_data[pose_data['frame'] % 2 == 0].reset_index(drop=True)
-                pose_data['frame'] = pose_data['frame'] // 2
-                downsampleflag = True
-                fps = 30
-            else:
-                fps = original_fps
-                
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+            # Load pose data
+            pose_data = pd.read_csv(pose_data_path)
             
-            # Process each frame
-            frame_idx = 0
-            last_valid_cricket = None
-            frames_since_valid = 0
-            video_frame_idx = 0
+            # ✅ FIX: Check if coordinates are normalized and denormalize if needed
+            pose_normalized = False
+            coord_cols = ['nose x', 'body center x', 'tail base x']
+            if all(col in pose_data.columns for col in coord_cols):
+                max_val = max(pose_data[coord_cols].max())
+                if max_val <= 1.1:  # Normalized coordinates
+                    pose_normalized = True
+                    print(f"  Denormalizing pose coordinates from [0,1] to pixels")
+                    
+                    # Denormalize X coordinates
+                    x_cols = [col for col in pose_data.columns if col.endswith(' x')]
+                    for col in x_cols:
+                        pose_data[col] = pose_data[col] * frame_width
+                    
+                    # Denormalize Y coordinates  
+                    y_cols = [col for col in pose_data.columns if col.endswith(' y')]
+                    for col in y_cols:
+                        pose_data[col] = pose_data[col] * frame_height
+            
+            # ✅ FIX: Check cricket coordinates too
+            cricket_normalized = False
+            if 'smoothed_x' in cricket_data.columns:
+                max_cricket = max(cricket_data[['smoothed_x', 'smoothed_y']].max())
+                if max_cricket <= 1.1:
+                    cricket_normalized = True
+                    print(f"  Denormalizing cricket coordinates from [0,1] to pixels")
+                    
+                    cricket_data['smoothed_x'] = cricket_data['smoothed_x'] * frame_width
+                    cricket_data['smoothed_y'] = cricket_data['smoothed_y'] * frame_height
+                    cricket_data['smoothed_w'] = cricket_data['smoothed_w'] * frame_width
+                    cricket_data['smoothed_h'] = cricket_data['smoothed_h'] * frame_height
+            
+            # Check FPS and downsample if needed
+            # TODO: Commented out temporarly due to debugging issues; need further checks
+            # if original_fps == 60:
+            #     downsampleflag = True
+            #     print(f"  Video is 60fps, will match with 30fps cricket data")
+            
+            # Initialize video writer
+            output_video_path = str(Path(output_path).with_suffix('.mp4'))
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            # ✅ FIX: Output 30fps when downsampling
+            target_fps = 30 if downsampleflag else original_fps
+            out = cv2.VideoWriter(output_video_path, fourcc, target_fps, 
+                                 (frame_width, frame_height))
+            
+            frame_results = []
+            frame_count = 0
             previous_distance = None
             
-            while cap.isOpened():
+            while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                    
-                video_frame_idx += 1
-                if downsampleflag and video_frame_idx % 2 != 1:
+                
+                # ✅ FIX: Skip odd frames when downsampling
+                if downsampleflag and frame_count % 2 != 0:
+                    frame_count += 1
                     continue
-                                
-                # Get current frame data
-                if frame_idx >= len(pose_data):
-                    break
+                
+                # Calculate which cricket frame this corresponds to
+                current_frame = frame_count // 2 if downsampleflag else frame_count
+                # current_frame = frame_count
+                
+                # Get pose data for this frame
+                pose_row = pose_data[pose_data['frame'] == current_frame]
+                if pose_row.empty:
+                    # Still write frame even without data for smooth video
+                    out.write(frame)
+                    frame_count += 1
+                    continue
+                
+                pose_row = pose_row.iloc[0]
+                
+                # Get cricket data for this frame
+                cricket_row = cricket_data[cricket_data['frame'] == current_frame]
+                
+                if not cricket_row.empty:
+                    cricket_row = cricket_row.iloc[0]
                     
-                pose_row = pose_data.iloc[frame_idx]                
-                cricket_row = cricket_data[cricket_data['frame'] == frame_idx].iloc[0] if not cricket_data[cricket_data['frame'] == frame_idx].empty else None
-
-                # Get cricket position
-                cricket_pos = None
-                if cricket_row is not None and not cricket_row[['smoothed_x', 'smoothed_y', 'smoothed_w', 'smoothed_h']].isnull().any():
+                    # Determine cricket position
                     if cricket_row['use_nose_position']:
-                        nose_x, nose_y = pose_row['nose x'], pose_row['nose y']
-                        use_nose = True
-                        
-                        if last_valid_cricket is not None:
-                            scaled_threshold = self.config.base_distance_threshold * (
-                                1 + self.config.distance_scaling_factor * frames_since_valid
-                            )
-                            distance = np.sqrt(
-                                (nose_x - last_valid_cricket[0])**2 + 
-                                (nose_y - last_valid_cricket[1])**2
-                            )
-                            use_nose = distance <= scaled_threshold
-                        
-                        if use_nose:
-                            cricket_pos = (nose_x, nose_y)
-                            frames_since_valid += 1
-                        else:
-                            cricket_pos = last_valid_cricket
-                            frames_since_valid += 1
+                        cricket_pos = (pose_row['nose x'], pose_row['nose y'])
                     else:
-                        # Convert normalized coordinates to pixel coordinates
-                        cricket_x = cricket_row['smoothed_x'] * frame_width
-                        cricket_y = cricket_row['smoothed_y'] * frame_height
-                        
-                        cricket_pos = (cricket_x, cricket_y)
-                        last_valid_cricket = cricket_pos
-                        frames_since_valid = 0
+                        cricket_pos = (cricket_row['smoothed_x'], cricket_row['smoothed_y'])
                     
-                    # Draw cricket bounding box
-                    cricket_w = cricket_row['smoothed_w'] * frame_width / 2
-                    cricket_h = cricket_row['smoothed_h'] * frame_height / 2
-                    top_left = (int(cricket_pos[0] - cricket_w), int(cricket_pos[1] - cricket_h))
-                    bottom_right = (int(cricket_pos[0] + cricket_w), int(cricket_pos[1] + cricket_h))
+                    # DEBUG: Draw cricket box
+                    bbox_w = cricket_row['smoothed_w'] / 2
+                    bbox_h = cricket_row['smoothed_h'] / 2
+                    top_left = (int(cricket_pos[0] - bbox_w), int(cricket_pos[1] - bbox_h))
+                    bottom_right = (int(cricket_pos[0] + bbox_w), int(cricket_pos[1] + bbox_h))
                     color = (0, 255, 255) if cricket_row['use_nose_position'] else (255, 255, 0)
                     cv2.rectangle(frame, top_left, bottom_right, color, 2)
+                else:
+                    cricket_pos = None
+                    cricket_row = None
                 
-                # Process frame and get results
-                frame_results = self.process_frame(frame, pose_row, cricket_pos, cricket_row, previous_distance)
-                frames_since_valid_counter = 0
-
-                if frame_results is not None:
-                    # Add frame index and store results
-                    frame_results['frame'] = frame_idx
-                    frame_results['validation'] = cricket_row['status'] if cricket_row is not None else 'missing'
-                    frame_results['frames_since_valid_detection'] = frames_since_valid_counter
-                    
-                    if frame_results['cricket_status'] == 'validated':
-                        frames_since_valid_counter = 0
-                    else:
-                        frames_since_valid_counter += 1
-                        
-                    previous_distance = frame_results['distance']
-                    results = pd.concat([results, pd.DataFrame([frame_results])], ignore_index=True)
+                # Process frame (MUST be at same indentation level!)
+                result = self.process_frame(frame, pose_row, cricket_pos, 
+                                       cricket_row, previous_distance)
                 
-                # Add frame number
-                cv2.putText(frame, f"Frame: {frame_idx}", 
-                        (frame.shape[1] - 150, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (255, 255, 255), 1, cv2.LINE_AA)
+                if result is not None:
+                    result['frame'] = current_frame
+                    result['validation'] = cricket_row['status'] if cricket_row is not None else 'missing'
+                    frame_results.append(result)
+                    previous_distance = result['distance']
                 
-                # Write frame
+                # DEBUG: Frame counter
+                cv2.putText(frame, f"Frame: {current_frame}", 
+                    (frame.shape[1] - 150, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+                
+                # Write frame (only even frames are written when downsampling)
                 out.write(frame)
-                frame_idx += 1
+                frame_count += 1
             
-            # Save results
-            results_path = output_path.replace('.mp4', '_analysis.csv')
-            results.to_csv(results_path, index=False)
-            
-            # Clean up
             cap.release()
             out.release()
             
-            return True
-            
+            # Save analysis results
+            if frame_results:
+                results = pd.DataFrame(frame_results)
+                csv_output = str(Path(output_path).with_suffix('.csv'))
+                results.to_csv(csv_output, index=False)
+                print(f"  ✓ Saved analysis to {Path(csv_output).name}")
+                print(f"  ✓ Saved video to {Path(output_video_path).name}")
+                return True
+            else:
+                print(f"  ✗ No results generated")
+                return False
+                
         except Exception as e:
-            print(f"Error processing {Path(video_path).name}: {e}")
+            print(f"  ✗ Error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def process_directory(self, video_dir: str, pose_dir: str, 
