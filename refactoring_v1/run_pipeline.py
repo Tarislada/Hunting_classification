@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Simple CLI runner for the hunting classification pipeline.
+Simple CLI runner for the hunting classification pipeline. 
 Provides easy commands for common pipeline operations.
 """
 
 import sys
 from pathlib import Path
 from pipeline import HuntingClassificationPipeline
-from config.settings import settings
+from config. settings import settings
 
 def print_banner():
     """Print a nice banner."""
@@ -15,14 +15,14 @@ def print_banner():
 🎯 HUNTING BEHAVIOR CLASSIFICATION PIPELINE
 ============================================
 A complete pipeline for analyzing mouse hunting behaviors
-from raw video data to behavioral classifications.
+from raw video data to behavioral classifications. 
     """
     print(banner)
 
 def show_help():
     """Show help information."""
     help_text = """
-USAGE:
+USAGE: 
     python run_pipeline.py [COMMAND] [OPTIONS]
 
 COMMANDS:
@@ -30,11 +30,12 @@ COMMANDS:
     steps             List all available pipeline steps
     check             Check if all required input directories exist
     
-    # Individual steps:
+    # Individual steps: 
     filter            Run keypoint filtering only
     angles            Run head angle calculation only  
     kalman            Run Kalman filtering only
     cricket           Run cricket processing only
+    cricket-simple    Run SIMPLIFIED cricket processing (interpolation & filtering only)
     features          Run feature engineering only
     classify          Run action classification only
 
@@ -49,19 +50,31 @@ EXAMPLES:
     python run_pipeline.py                    # Run complete pipeline
     python run_pipeline.py run                # Same as above
     python run_pipeline.py steps              # List all steps
-    python run_pipeline.py check              # Check inputs
+    python run_pipeline. py check              # Check inputs
     python run_pipeline.py filter             # Run only keypoint filtering
+    python run_pipeline.py cricket-simple     # Run simplified cricket processing
     python run_pipeline.py labels             # Run only label processing
     python run_pipeline.py features           # Run only feature engineering
     python run_pipeline.py --output-dir ./results  # Custom output directory
 
 PIPELINE STEPS:
-    1. filter    - Keypoint filtering with Savitzky-Golay smoothing
-    2. angles    - Head angle calculation from pose keypoints
-    3. kalman    - Kalman filtering and outlier removal
-    4. cricket   - Cricket detection validation and interpolation
-    5. features  - Visual field analysis and feature engineering
-    6. classify  - XGBoost behavioral classification
+    1. filter         - Keypoint filtering with Savitzky-Golay smoothing
+    2. angles         - Head angle calculation from pose keypoints
+    3. kalman         - Kalman filtering and outlier removal
+    4. cricket        - Cricket detection validation and interpolation (full)
+       cricket-simple - Cricket processing (basic interpolation & filtering ONLY)
+    5. features       - Visual field analysis and feature engineering
+    6. classify       - XGBoost behavioral classification
+
+WORKAROUND MODE (cricket-simple):
+    The cricket-simple command bypasses complicated processing: 
+    - No validation metrics calculation
+    - No reliability scoring
+    - No adaptive smoothing based on gaps
+    - Only basic linear interpolation for small gaps
+    - Only basic Savitzky-Golay filtering
+    
+    Use this when full cricket processing is causing issues. 
 
 For advanced usage, use pipeline.py directly.
     """
@@ -74,7 +87,7 @@ def check_inputs():
     
     required_dirs = {
         'Raw videos': settings.paths.raw_video_dir,
-        'Pose data': settings.paths.pose_data_dir,
+        'Pose data':  settings.paths.pose_data_dir,
         'Cricket detection': settings.paths.cricket_detection_dir,
         'Interval txt files': settings.paths.interval_txt_dir,
         'Behavior annotations': settings.paths.annotation_dir
@@ -89,12 +102,12 @@ def check_inputs():
             all_exist = False
     
     print()
-    if all_exist:
+    if all_exist: 
         print("🎉 All required input directories exist!")
     else:
         print("⚠️  Some input directories are missing.")
         print("   Make sure your data is in the correct locations")
-        print("   or use --video-dir, --pose-dir, etc. to override paths")
+        print("   or use --video-dir, --pose-dir, etc.  to override paths")
     
     return all_exist
 
@@ -115,7 +128,7 @@ def run_command(command, **kwargs):
     try:
         if command == 'run':
             print("🚀 Running complete pipeline...")
-            result = pipeline.run_pipeline()
+            result = pipeline. run_pipeline()
             return result['success']
             
         elif command == 'steps':
@@ -124,6 +137,14 @@ def run_command(command, **kwargs):
             
         elif command == 'check':
             return check_inputs()
+        
+        elif command == 'cricket-simple':
+            # Run simplified cricket processing
+            print("🚀 Running simplified cricket processing (workaround mode)...")
+            from processing.simple_cricket_processor import SimpleCricketProcessor
+            processor = SimpleCricketProcessor()
+            result = processor.process()
+            return result['processed'] > 0 or result['failed'] == 0
             
         elif command in step_mapping:
             step_name = step_mapping[command]
@@ -132,7 +153,7 @@ def run_command(command, **kwargs):
             return result['success']
             
         else:
-            print(f"❌ Unknown command: {command}")
+            print(f"❌ Unknown command:  {command}")
             print("Use 'python run_pipeline.py --help' for usage information")
             return False
             
@@ -141,13 +162,14 @@ def run_command(command, **kwargs):
         return False
     except Exception as e:
         print(f"💥 Error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def parse_args():
     """Simple argument parsing."""
     args = sys.argv[1:]
     
-    # Extract options
     options = {}
     filtered_args = []
     
@@ -183,30 +205,31 @@ def main():
     """Main entry point."""
     print_banner()
     
+    # Parse command line arguments
     command, options = parse_args()
     
-    # Apply configuration overrides
-    if 'video_dir' in options:
-        settings.paths.raw_video_dir = Path(options['video_dir'])
+    # Override settings if provided
+    if 'video_dir' in options: 
+        settings.paths.raw_video_dir = options['video_dir']
         print(f"📁 Using video directory: {options['video_dir']}")
     
     if 'pose_dir' in options:
-        settings.paths.pose_data_dir = Path(options['pose_dir'])
+        settings. paths.pose_data_dir = options['pose_dir']
         print(f"📁 Using pose directory: {options['pose_dir']}")
     
     if 'cricket_dir' in options:
-        settings.paths.cricket_detection_dir = Path(options['cricket_dir'])
+        settings.paths.cricket_detection_dir = options['cricket_dir']
         print(f"📁 Using cricket directory: {options['cricket_dir']}")
     
-    if 'output_dir' in options:
+    if 'output_dir' in options: 
         base_dir = Path(options['output_dir'])
         settings.paths.savgol_pose_dir = base_dir / "savgol_pose"
         settings.paths.head_angle_dir = base_dir / "head_angle"
         settings.paths.kalman_filtered_dir = base_dir / "kalman_filtered"
         settings.paths.cricket_processed_dir = base_dir / "cricket_processed"
         settings.paths.final_videos_dir = base_dir / "final_videos"
-        settings.paths.behavior_labels_dir = base_dir / "behavior_labels"
-        settings.paths.visualization_dir = base_dir / "visualization"
+        settings. paths.behavior_labels_dir = base_dir / "behavior_labels"
+        settings. paths.visualization_dir = base_dir / "visualization"
         print(f"📁 Using output directory: {options['output_dir']}")
     
     # Show current configuration
@@ -226,5 +249,5 @@ def main():
         print("\n💥 Operation failed!")
         sys.exit(1)
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     main()
